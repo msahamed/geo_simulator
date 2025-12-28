@@ -11,7 +11,7 @@ pub mod strain;
 pub mod element;
 pub mod body_force;
 
-pub use constitutive::IsotropicElasticity;
+pub use constitutive::{IsotropicElasticity, NewtonianViscosity};
 pub use strain::StrainDisplacement;
 pub use element::ElasticityElement;
 pub use body_force::BodyForce;

@@ -12,4 +12,4 @@ pub use mesh_generator_improved::ImprovedMeshGenerator;
 pub use physics::{ThermalField, PressureField};
 pub use fem::{Tet10Basis, GaussQuadrature, DofManager, ElementMatrix, Assembler, BoundaryConditions, BoundaryFace};
 pub use linalg::{Solver, DirectSolver, ConjugateGradient};
-pub use mechanics::{IsotropicElasticity, StrainDisplacement, ElasticityElement, BodyForce};
+pub use mechanics::{IsotropicElasticity, NewtonianViscosity, StrainDisplacement, ElasticityElement, BodyForce};

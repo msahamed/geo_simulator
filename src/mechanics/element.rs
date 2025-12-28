@@ -4,7 +4,7 @@
 
 use nalgebra::{Point3, SMatrix};
 use crate::fem::{GaussQuadrature, Tet10Basis};
-use super::{IsotropicElasticity, StrainDisplacement};
+use super::{IsotropicElasticity, NewtonianViscosity, StrainDisplacement};
 
 /// Element matrix computations for linear elasticity
 pub struct ElasticityElement;
@@ -56,6 +56,61 @@ impl ElasticityElement {
 
             // Compute B^T D B contribution
             // Strategy: First compute DB = D * B (6×30), then B^T * (DB)
+            let DB = D * B;
+            let BT_DB = B.transpose() * DB;
+
+            // Accumulate weighted contribution
+            K_elem += w * BT_DB;
+        }
+
+        K_elem
+    }
+
+    /// Compute element viscosity matrix for viscous flow
+    ///
+    /// K_e^viscous = ∫ B^T D_viscous B dV
+    ///
+    /// Where:
+    /// - B is the 6×30 strain-rate-velocity matrix (same as elasticity B-matrix)
+    /// - D_viscous is the 6×6 viscous constitutive matrix relating stress to strain-rate
+    /// - Integration uses 4-point Gauss quadrature
+    ///
+    /// This matrix relates velocity DOFs to forces for steady-state Stokes flow.
+    /// The formulation is identical to elasticity, just with different constitutive relation:
+    /// - Elasticity: σ = D_elastic ε  (stress ∝ strain)
+    /// - Viscous: τ = D_viscous ε̇     (stress ∝ strain-rate)
+    ///
+    /// # Arguments
+    /// * `vertices` - Physical coordinates of the 4 element vertices
+    /// * `material` - Newtonian viscosity material properties
+    ///
+    /// # Returns
+    /// 30×30 element viscosity matrix
+    pub fn viscosity_matrix(
+        vertices: &[Point3<f64>; 4],
+        material: &NewtonianViscosity,
+    ) -> SMatrix<f64, 30, 30> {
+        let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
+
+        // Get viscous constitutive matrix (relates ε̇ to τ)
+        let D = material.constitutive_matrix();
+
+        // 4-point Gauss quadrature (degree 2, sufficient for linear strain-rate)
+        let quad = GaussQuadrature::tet_4point();
+
+        // Compute Jacobian and determinant (constant for linear tets)
+        let J = Tet10Basis::jacobian(vertices);
+        let det_J = J.determinant();
+
+        // Numerical integration: K_e = ∫ B^T D B dV
+        for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            // Compute B matrix (strain-rate-velocity relation)
+            let B = StrainDisplacement::compute_b_at_point(qp, vertices);
+
+            // Integration weight includes Jacobian determinant
+            let w = weight * det_J.abs();
+
+            // Compute B^T D B
             let DB = D * B;
             let BT_DB = B.transpose() * DB;
 
@@ -187,6 +242,83 @@ mod tests {
         for i in 0..30 {
             for j in 0..30 {
                 assert_eq!(M[(i, j)], 0.0);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Viscosity Matrix Tests
+    // ========================================================================
+
+    #[test]
+    fn test_viscosity_matrix_symmetry() {
+        use super::NewtonianViscosity;
+
+        let vertices = create_reference_tet();
+        let material = NewtonianViscosity::new(1000.0);
+
+        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+
+        // Check symmetry
+        for i in 0..30 {
+            for j in 0..30 {
+                assert_relative_eq!(K[(i, j)], K[(j, i)], epsilon = 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_viscosity_matrix_dimensions() {
+        use super::NewtonianViscosity;
+
+        let vertices = create_reference_tet();
+        let material = NewtonianViscosity::new(1000.0);
+
+        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+
+        assert_eq!(K.nrows(), 30);
+        assert_eq!(K.ncols(), 30);
+    }
+
+    #[test]
+    fn test_viscosity_matrix_positive_definite() {
+        use super::NewtonianViscosity;
+
+        let vertices = create_reference_tet();
+        let material = NewtonianViscosity::new(1000.0);
+
+        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+
+        // Compute eigenvalues
+        let eigen = K.symmetric_eigen();
+        let eigenvalues: Vec<f64> = eigen.eigenvalues.iter().copied().collect();
+
+        // For viscous flow, all eigenvalues should be non-negative
+        // (Unlike elasticity, no rigid body modes for velocity field)
+        for (i, &eig) in eigenvalues.iter().enumerate() {
+            assert!(eig >= -1e-6, "Eigenvalue {} = {} should be non-negative", i, eig);
+        }
+    }
+
+    #[test]
+    fn test_viscosity_matrix_scales_with_viscosity() {
+        use super::NewtonianViscosity;
+
+        let vertices = create_reference_tet();
+
+        let mu1 = 1000.0;
+        let mu2 = 2000.0;
+
+        let mat1 = NewtonianViscosity::new(mu1);
+        let mat2 = NewtonianViscosity::new(mu2);
+
+        let K1 = ElasticityElement::viscosity_matrix(&vertices, &mat1);
+        let K2 = ElasticityElement::viscosity_matrix(&vertices, &mat2);
+
+        // K should scale linearly with viscosity
+        for i in 0..30 {
+            for j in 0..30 {
+                assert_relative_eq!(K2[(i, j)], K1[(i, j)] * 2.0, epsilon = 1e-8);
             }
         }
     }

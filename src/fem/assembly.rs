@@ -420,6 +420,136 @@ impl Assembler {
         triplets.to_csr()
     }
 
+    /// Assemble global viscosity matrix for viscous flow (serial)
+    ///
+    /// K = Σ_e K_e  where each K_e is 30×30 for velocity fields (3 DOF/node)
+    ///
+    /// # Arguments
+    /// * `mesh` - The mesh
+    /// * `dof_mgr` - DOF manager (must have dofs_per_node = 3)
+    /// * `material` - Newtonian viscosity material properties
+    ///
+    /// # Returns
+    /// Global viscosity matrix in CSR format
+    ///
+    /// # Panics
+    /// Panics if DOF manager doesn't have exactly 3 DOF per node
+    #[allow(non_snake_case)]
+    pub fn assemble_viscosity_stiffness_serial(
+        mesh: &Mesh,
+        dof_mgr: &DofManager,
+        material: &crate::mechanics::NewtonianViscosity,
+    ) -> CsMat<f64> {
+        assert_eq!(
+            dof_mgr.dofs_per_node(),
+            3,
+            "Viscous flow requires 3 DOF per node (velocity components)"
+        );
+
+        let n_dofs = dof_mgr.total_dofs();
+        let mut triplets = TriMat::new((n_dofs, n_dofs));
+
+        // Loop over all elements
+        for elem in &mesh.connectivity.tet10_elements {
+            // Get physical coordinates of element vertices
+            let vertices = [
+                mesh.geometry.nodes[elem.vertices()[0]],
+                mesh.geometry.nodes[elem.vertices()[1]],
+                mesh.geometry.nodes[elem.vertices()[2]],
+                mesh.geometry.nodes[elem.vertices()[3]],
+            ];
+
+            // Compute 30×30 element viscosity matrix
+            let K_elem = crate::mechanics::ElasticityElement::viscosity_matrix(&vertices, material);
+
+            // Assemble into global matrix
+            // For each node pair (i,j) and DOF component pair (comp_i, comp_j)
+            for i in 0..10 {
+                for local_dof_i in 0..3 {
+                    let global_i = dof_mgr.global_dof(elem.nodes[i], local_dof_i);
+
+                    for j in 0..10 {
+                        for local_dof_j in 0..3 {
+                            let global_j = dof_mgr.global_dof(elem.nodes[j], local_dof_j);
+
+                            // Map to element matrix indices
+                            let elem_row = 3 * i + local_dof_i;
+                            let elem_col = 3 * j + local_dof_j;
+
+                            triplets.add_triplet(global_i, global_j, K_elem[(elem_row, elem_col)]);
+                        }
+                    }
+                }
+            }
+        }
+
+        triplets.to_csr()
+    }
+
+    /// Assemble global viscosity matrix for viscous flow (parallel)
+    ///
+    /// Uses Rayon for parallel element matrix computation
+    ///
+    /// # Arguments
+    /// * `mesh` - The mesh
+    /// * `dof_mgr` - DOF manager (must have dofs_per_node = 3)
+    /// * `material` - Newtonian viscosity material properties
+    ///
+    /// # Returns
+    /// Global viscosity matrix in CSR format
+    #[allow(non_snake_case)]
+    pub fn assemble_viscosity_stiffness_parallel(
+        mesh: &Mesh,
+        dof_mgr: &DofManager,
+        material: &crate::mechanics::NewtonianViscosity,
+    ) -> CsMat<f64> {
+        assert_eq!(dof_mgr.dofs_per_node(), 3, "Viscous flow requires 3 DOF per node");
+
+        let n_dofs = dof_mgr.total_dofs();
+
+        // Compute element matrices in parallel
+        let element_matrices: Vec<_> = mesh
+            .connectivity
+            .tet10_elements
+            .par_iter()
+            .map(|elem| {
+                let vertices = [
+                    mesh.geometry.nodes[elem.vertices()[0]],
+                    mesh.geometry.nodes[elem.vertices()[1]],
+                    mesh.geometry.nodes[elem.vertices()[2]],
+                    mesh.geometry.nodes[elem.vertices()[3]],
+                ];
+                crate::mechanics::ElasticityElement::viscosity_matrix(&vertices, material)
+            })
+            .collect();
+
+        // Sequential assembly of triplets
+        let mut triplets = TriMat::new((n_dofs, n_dofs));
+
+        for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let K_elem = &element_matrices[elem_idx];
+
+            for i in 0..10 {
+                for local_dof_i in 0..3 {
+                    let global_i = dof_mgr.global_dof(elem.nodes[i], local_dof_i);
+
+                    for j in 0..10 {
+                        for local_dof_j in 0..3 {
+                            let global_j = dof_mgr.global_dof(elem.nodes[j], local_dof_j);
+
+                            let elem_row = 3 * i + local_dof_i;
+                            let elem_col = 3 * j + local_dof_j;
+
+                            triplets.add_triplet(global_i, global_j, K_elem[(elem_row, elem_col)]);
+                        }
+                    }
+                }
+            }
+        }
+
+        triplets.to_csr()
+    }
+
     /// Assemble global body force vector for gravity
     ///
     /// f = Σ_e f_e  where f_e = ∫ N^T ρg dV

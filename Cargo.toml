@@ -36,3 +36,7 @@ path = "benchmarks/elasticity_halfspace_gravity.rs"
 [[bin]]
 name = "elasticity_patch_test"
 path = "benchmarks/elasticity_patch_test.rs"
+
+[[bin]]
+name = "viscous_couette_flow"
+path = "benchmarks/viscous_couette_flow.rs"
