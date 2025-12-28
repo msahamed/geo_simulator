@@ -141,6 +141,20 @@ impl Tet10Basis {
         [L_vec[0], L_vec[1], L_vec[2], L_vec[3]]
     }
 
+    /// Linearized Jacobian (using only vertices)
+    pub fn jacobian_linear(vertices: &[Point3<f64>; 4]) -> Matrix3<f64> {
+        let v0 = &vertices[0];
+        let v1 = &vertices[1];
+        let v2 = &vertices[2];
+        let v3 = &vertices[3];
+
+        Matrix3::new(
+            v1.x - v0.x, v2.x - v0.x, v3.x - v0.x,
+            v1.y - v0.y, v2.y - v0.y, v3.y - v0.y,
+            v1.z - v0.z, v2.z - v0.z, v3.z - v0.z,
+        )
+    }
+
     /// Evaluate shape functions at Cartesian coordinates
     ///
     /// # Arguments
@@ -163,39 +177,46 @@ impl Tet10Basis {
     /// J_ij = ∂x_i / ∂L_j
     ///
     /// # Arguments
-    /// * `vertices` - The 4 vertex coordinates [x0, x1, x2, x3]
+    /// * `L` - Barycentric coordinates [L0, L1, L2, L3]
+    /// * `nodes` - The 10 node coordinates of the Tet10 element
     ///
     /// # Returns
-    /// 3×3 Jacobian matrix (only 3 columns since L0 + L1 + L2 + L3 = 1)
-    ///
-    /// We use L1, L2, L3 as independent variables (L0 = 1 - L1 - L2 - L3)
+    /// 3×3 Jacobian matrix using L1, L2, L3 as independent variables
     #[allow(non_snake_case)]
-    pub fn jacobian(vertices: &[Point3<f64>; 4]) -> Matrix3<f64> {
-        let v0 = &vertices[0];
-        let v1 = &vertices[1];
-        let v2 = &vertices[2];
-        let v3 = &vertices[3];
+    pub fn jacobian(L: &[f64; 4], nodes: &[Point3<f64>; 10]) -> Matrix3<f64> {
+        let dN_dL = Self::shape_derivatives_barycentric(L);
+        let mut J = Matrix3::zeros();
 
-        // x = L0*x0 + L1*x1 + L2*x2 + L3*x3
-        // Since L0 = 1 - L1 - L2 - L3:
-        // x = (1-L1-L2-L3)*x0 + L1*x1 + L2*x2 + L3*x3
-        //   = x0 + L1*(x1-x0) + L2*(x2-x0) + L3*(x3-x0)
-        //
-        // ∂x/∂L1 = x1 - x0
-        // ∂x/∂L2 = x2 - x0
-        // ∂x/∂L3 = x3 - x0
+        for i in 0..10 {
+            let x = nodes[i].x;
+            let y = nodes[i].y;
+            let z = nodes[i].z;
 
-        Matrix3::new(
-            v1.x - v0.x, v2.x - v0.x, v3.x - v0.x,
-            v1.y - v0.y, v2.y - v0.y, v3.y - v0.y,
-            v1.z - v0.z, v2.z - v0.z, v3.z - v0.z,
-        )
+            // Use L1, L2, L3 as independent variables (L0 = 1 - L1 - L2 - L3)
+            let dN_dL1 = dN_dL[i][1] - dN_dL[i][0];
+            let dN_dL2 = dN_dL[i][2] - dN_dL[i][0];
+            let dN_dL3 = dN_dL[i][3] - dN_dL[i][0];
+
+            J[(0, 0)] += x * dN_dL1;
+            J[(0, 1)] += x * dN_dL2;
+            J[(0, 2)] += x * dN_dL3;
+
+            J[(1, 0)] += y * dN_dL1;
+            J[(1, 1)] += y * dN_dL2;
+            J[(1, 2)] += y * dN_dL3;
+
+            J[(2, 0)] += z * dN_dL1;
+            J[(2, 1)] += z * dN_dL2;
+            J[(2, 2)] += z * dN_dL3;
+        }
+        J
     }
 
     /// Compute shape function derivatives with respect to Cartesian coordinates
     ///
     /// # Arguments
-    /// * `vertices` - The 4 vertex coordinates
+    /// * `L` - Barycentric coordinates
+    /// * `nodes` - The 10 node coordinates
     ///
     /// # Returns
     /// Array of 10 derivative vectors [∂N/∂x, ∂N/∂y, ∂N/∂z]
@@ -204,13 +225,13 @@ impl Tet10Basis {
     #[allow(non_snake_case)]
     pub fn shape_derivatives_cartesian(
         L: &[f64; 4],
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
     ) -> [[f64; 3]; 10] {
         // Get derivatives in barycentric coordinates
         let dN_dL = Self::shape_derivatives_barycentric(L);
 
         // Get Jacobian J = ∂x/∂L
-        let J = Self::jacobian(vertices);
+        let J = Self::jacobian(L, nodes);
 
         // Compute inverse Jacobian
         let J_inv = J.try_inverse().expect("Singular Jacobian");
@@ -244,17 +265,89 @@ impl Tet10Basis {
         dN_dx
     }
 
-    /// Compute element volume (6V where V is tetrahedron volume)
+    /// Evaluate an arbitrary field value at a point within the element
     ///
     /// # Arguments
-    /// * `vertices` - The 4 vertex coordinates
+    /// * `L` - Barycentric coordinates
+    /// * `nodal_values` - Values at each of the 10 nodes (can be scalar or vector)
+    pub fn evaluate_at_point<T>(L: &[f64; 4], nodal_values: &[T; 10]) -> T
+    where
+        T: Default + std::ops::Mul<f64, Output = T> + std::ops::Add<T, Output = T> + Copy,
+    {
+        let N = Self::shape_functions(L);
+        let mut result = nodal_values[0] * N[0];
+        for i in 1..10 {
+            result = result + nodal_values[i] * N[i];
+        }
+        result
+    }
+
+    /// Iteratively find barycentric coordinates for a point in a potentially curved Tet10
+    ///
+    /// # Arguments
+    /// * `point` - Physical point (x, y, z)
+    /// * `nodes` - The 10 node coordinates
+    /// * `guess` - Initial guess for barycentric coordinates
+    ///
+    /// # Returns
+    /// Improved barycentric coordinates
+    pub fn find_barycentric_iterative(
+        point: &Point3<f64>,
+        nodes: &[Point3<f64>; 10],
+        guess: [f64; 4],
+    ) -> [f64; 4] {
+        let mut L = guess;
+        let p_target = point.coords;
+
+        // Simple Newton iteration
+        for _ in 0..5 {
+            // F(L) = X(L) - P
+            let n = Self::shape_functions(&L);
+            let mut x_l = Vector3::zeros();
+            for i in 0..10 {
+                x_l += nodes[i].coords * n[i];
+            }
+            
+            let res = x_l - p_target;
+            if res.norm() < 1e-10 {
+                break;
+            }
+
+            // Jacobian J = ∂X/∂L
+            let J = Self::jacobian(&L, nodes);
+            
+            // Note: Since L0+L1+L2+L3=1, we only vary L1, L2, L3
+            // Res = J * dL
+            if let Some(J_inv) = J.try_inverse() {
+                let dL = J_inv * res;
+                L[1] -= dL[0];
+                L[2] -= dL[1];
+                L[3] -= dL[2];
+                L[0] = 1.0 - L[1] - L[2] - L[3];
+            } else {
+                break;
+            }
+        }
+        L
+    }
+
+    /// Compute element volume
+    ///
+    /// # Arguments
+    /// * `nodes` - The 10 node coordinates
     ///
     /// # Returns
     /// Volume of the tetrahedron
     #[allow(non_snake_case)]
-    pub fn element_volume(vertices: &[Point3<f64>; 4]) -> f64 {
-        let J = Self::jacobian(vertices);
-        J.determinant().abs() / 6.0
+    pub fn element_volume(nodes: &[Point3<f64>; 10]) -> f64 {
+        // For Tet10, volume is integrated using quadrature
+        let quad = crate::fem::GaussQuadrature::tet_4point();
+        let mut volume = 0.0;
+        for (L, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            let J = Self::jacobian(L, nodes);
+            volume += J.determinant().abs() * weight;
+        }
+        volume
     }
 }
 
@@ -262,6 +355,23 @@ impl Tet10Basis {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    fn create_unit_tet10() -> [Point3<f64>; 10] {
+        let v0 = Point3::new(0.0, 0.0, 0.0);
+        let v1 = Point3::new(1.0, 0.0, 0.0);
+        let v2 = Point3::new(0.0, 1.0, 0.0);
+        let v3 = Point3::new(0.0, 0.0, 1.0);
+
+        [
+            v0, v1, v2, v3,
+            Point3::new(0.5, 0.0, 0.0), // 0-1
+            Point3::new(0.5, 0.5, 0.0), // 1-2
+            Point3::new(0.0, 0.5, 0.0), // 2-0
+            Point3::new(0.0, 0.0, 0.5), // 0-3
+            Point3::new(0.5, 0.0, 0.5), // 1-3
+            Point3::new(0.0, 0.5, 0.5), // 2-3
+        ]
+    }
 
     #[test]
     fn test_partition_of_unity() {
@@ -327,14 +437,9 @@ mod tests {
     #[test]
     fn test_reference_element_volume() {
         // Reference tetrahedron: vertices at (0,0,0), (1,0,0), (0,1,0), (0,0,1)
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
-        let volume = Tet10Basis::element_volume(&vertices);
+        let volume = Tet10Basis::element_volume(&nodes);
         // Volume of reference tet is 1/6
         assert_relative_eq!(volume, 1.0 / 6.0, epsilon = 1e-14);
     }

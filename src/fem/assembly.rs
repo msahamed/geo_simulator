@@ -1,3 +1,4 @@
+use nalgebra::{Point3, SMatrix};
 use sprs::{CsMat, TriMat};
 use rayon::prelude::*;
 use crate::mesh::Mesh;
@@ -30,16 +31,14 @@ impl Assembler {
 
         // Loop over all elements
         for elem in &mesh.connectivity.tet10_elements {
-            // Get vertex coordinates
-            let vertices = [
-                mesh.geometry.nodes[elem.vertices()[0]],
-                mesh.geometry.nodes[elem.vertices()[1]],
-                mesh.geometry.nodes[elem.vertices()[2]],
-                mesh.geometry.nodes[elem.vertices()[3]],
-            ];
+            // Get all 10 node coordinates
+            let mut nodes = [Point3::origin(); 10];
+            for i in 0..10 {
+                nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+            }
 
             // Compute element stiffness matrix
-            let k_elem = ElementMatrix::thermal_stiffness(&vertices, conductivity);
+            let k_elem = ElementMatrix::thermal_stiffness(&nodes, conductivity);
 
             // Assemble into global matrix
             for i in 0..10 {
@@ -80,16 +79,14 @@ impl Assembler {
             .tet10_elements
             .par_iter()
             .map(|elem| {
-                // Get vertex coordinates
-                let vertices = [
-                    mesh.geometry.nodes[elem.vertices()[0]],
-                    mesh.geometry.nodes[elem.vertices()[1]],
-                    mesh.geometry.nodes[elem.vertices()[2]],
-                    mesh.geometry.nodes[elem.vertices()[3]],
-                ];
+                // Get all 10 node coordinates
+                let mut nodes = [Point3::origin(); 10];
+                for (i, &node_id) in elem.nodes.iter().enumerate() {
+                    nodes[i] = mesh.geometry.nodes[node_id];
+                }
 
                 // Compute element matrix
-                let k_elem = ElementMatrix::thermal_stiffness(&vertices, conductivity);
+                let k_elem = ElementMatrix::thermal_stiffness(&nodes, conductivity);
 
                 // Store triplets for this element
                 let mut elem_triplets = Vec::with_capacity(100); // 10x10 = 100 entries
@@ -139,14 +136,12 @@ impl Assembler {
         let mut f_global = vec![0.0; n_dofs];
 
         for elem in &mesh.connectivity.tet10_elements {
-            let vertices = [
-                mesh.geometry.nodes[elem.vertices()[0]],
-                mesh.geometry.nodes[elem.vertices()[1]],
-                mesh.geometry.nodes[elem.vertices()[2]],
-                mesh.geometry.nodes[elem.vertices()[3]],
-            ];
+            let mut nodes = [Point3::origin(); 10];
+            for i in 0..10 {
+                nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+            }
 
-            let f_elem = ElementMatrix::thermal_load(&vertices, source);
+            let f_elem = ElementMatrix::thermal_load(&nodes, source);
 
             // Assemble into global vector
             for i in 0..10 {
@@ -321,16 +316,14 @@ impl Assembler {
 
         // Loop over all elements
         for elem in &mesh.connectivity.tet10_elements {
-            // Get physical coordinates of element vertices
-            let vertices = [
-                mesh.geometry.nodes[elem.vertices()[0]],
-                mesh.geometry.nodes[elem.vertices()[1]],
-                mesh.geometry.nodes[elem.vertices()[2]],
-                mesh.geometry.nodes[elem.vertices()[3]],
-            ];
+            // Get all 10 node coordinates
+            let mut nodes = [Point3::origin(); 10];
+            for i in 0..10 {
+                nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+            }
 
             // Compute 30×30 element stiffness matrix
-            let K_elem = crate::mechanics::ElasticityElement::stiffness_matrix(&vertices, material);
+            let K_elem = crate::mechanics::ElasticityElement::stiffness_matrix(&nodes, material);
 
             // Assemble into global matrix
             // For each node pair (i,j) and DOF component pair (comp_i, comp_j)
@@ -383,13 +376,11 @@ impl Assembler {
             .tet10_elements
             .par_iter()
             .map(|elem| {
-                let vertices = [
-                    mesh.geometry.nodes[elem.vertices()[0]],
-                    mesh.geometry.nodes[elem.vertices()[1]],
-                    mesh.geometry.nodes[elem.vertices()[2]],
-                    mesh.geometry.nodes[elem.vertices()[3]],
-                ];
-                crate::mechanics::ElasticityElement::stiffness_matrix(&vertices, material)
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 {
+                    nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+                }
+                crate::mechanics::ElasticityElement::stiffness_matrix(&nodes, material)
             })
             .collect();
 
@@ -451,16 +442,13 @@ impl Assembler {
 
         // Loop over all elements
         for elem in &mesh.connectivity.tet10_elements {
-            // Get physical coordinates of element vertices
-            let vertices = [
-                mesh.geometry.nodes[elem.vertices()[0]],
-                mesh.geometry.nodes[elem.vertices()[1]],
-                mesh.geometry.nodes[elem.vertices()[2]],
-                mesh.geometry.nodes[elem.vertices()[3]],
-            ];
+            let mut nodes = [Point3::origin(); 10];
+            for i in 0..10 {
+                nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+            }
 
             // Compute 30×30 element viscosity matrix
-            let K_elem = crate::mechanics::ElasticityElement::viscosity_matrix(&vertices, material);
+            let K_elem = crate::mechanics::ElasticityElement::viscosity_matrix(&nodes, material);
 
             // Assemble into global matrix
             // For each node pair (i,j) and DOF component pair (comp_i, comp_j)
@@ -513,13 +501,11 @@ impl Assembler {
             .tet10_elements
             .par_iter()
             .map(|elem| {
-                let vertices = [
-                    mesh.geometry.nodes[elem.vertices()[0]],
-                    mesh.geometry.nodes[elem.vertices()[1]],
-                    mesh.geometry.nodes[elem.vertices()[2]],
-                    mesh.geometry.nodes[elem.vertices()[3]],
-                ];
-                crate::mechanics::ElasticityElement::viscosity_matrix(&vertices, material)
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 {
+                    nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+                }
+                crate::mechanics::ElasticityElement::viscosity_matrix(&nodes, material)
             })
             .collect();
 
@@ -541,6 +527,101 @@ impl Assembler {
                             let elem_col = 3 * j + local_dof_j;
 
                             triplets.add_triplet(global_i, global_j, K_elem[(elem_row, elem_col)]);
+                        }
+                    }
+                }
+            }
+        }
+
+        triplets.to_csr()
+    }
+
+    /// Assemble global viscosity matrix for Visco-Elasto-Plastic flow (parallel)
+    ///
+    /// Computes μ_eff = min(μ_viscous, μ_plastic) for each element using its
+    /// current strain rate and accumulated plastic strain.
+    ///
+    /// # Arguments
+    /// * `mesh` - The mesh (with optional plasticity_state)
+    /// * `dof_mgr` - DOF manager
+    /// * `material` - EVP material properties
+    /// * `current_velocity` - Current velocity field (used for strain rate)
+    /// * `element_pressures` - Pressure field (optional, scalar per element)
+    ///
+    /// # Returns
+    /// Global viscosity matrix in CSR format
+    #[allow(non_snake_case)]
+    pub fn assemble_stokes_vep_parallel(
+        mesh: &Mesh,
+        dof_mgr: &DofManager,
+        material: &crate::mechanics::ElastoViscoPlastic,
+        current_velocity: &[f64],
+        element_pressures: &[f64],
+    ) -> CsMat<f64> {
+        assert_eq!(dof_mgr.dofs_per_node(), 3, "Stokes flow requires 3 DOF per node");
+        assert_eq!(element_pressures.len(), mesh.connectivity.tet10_elements.len());
+
+        let n_dofs = dof_mgr.total_dofs();
+
+        // Compute element matrices in parallel
+        let element_matrices: Vec<_> = mesh
+            .connectivity
+            .tet10_elements
+            .par_iter()
+            .enumerate()
+            .map(|(elem_id, elem)| {
+                // 1. Get nodes
+                let mut nodes = [Point3::origin(); 10];
+                for (i, &node_id) in elem.nodes.iter().enumerate() {
+                    nodes[i] = mesh.geometry.nodes[node_id];
+                }
+
+                // 2. Compute average strain rate in element from current_velocity
+                let mut strain_rate = SMatrix::<f64, 6, 1>::zeros();
+                let quad = crate::fem::GaussQuadrature::tet_4point();
+                
+                for (qp, _) in quad.points.iter().zip(quad.weights.iter()) {
+                    let B = crate::mechanics::StrainDisplacement::compute_b_at_point(qp, &nodes);
+                    
+                    // Extract element nodal velocities
+                    let mut v_elem = SMatrix::<f64, 30, 1>::zeros();
+                    for i in 0..10 {
+                        for comp in 0..3 {
+                            let global_dof = dof_mgr.global_dof(elem.nodes[i], comp);
+                            v_elem[3 * i + comp] = current_velocity[global_dof];
+                        }
+                    }
+                    
+                    strain_rate += B * v_elem;
+                }
+                strain_rate /= quad.points.len() as f64;
+
+                // 3. Get accumulated plastic strain
+                let eps_p = mesh.plasticity_state.as_ref().map_or(0.0, |ps| ps.get(elem_id));
+
+                // 4. Compute effective viscosity μ_eff
+                let mu_p = material.plasticity.softened_viscosity(&strain_rate, element_pressures[elem_id], eps_p);
+                let mu_eff = material.viscosity.min(mu_p);
+
+                // 5. Build element viscosity matrix using μ_eff
+                let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff);
+                crate::mechanics::ElasticityElement::viscosity_matrix(&nodes, &temp_viscosity)
+            })
+            .collect();
+
+        // Sequential assembly of triplets
+        let mut triplets = TriMat::new((n_dofs, n_dofs));
+
+        for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let K_elem = &element_matrices[elem_idx];
+
+            for i in 0..10 {
+                for ld_i in 0..3 {
+                    let gi = dof_mgr.global_dof(elem.nodes[i], ld_i);
+                    for j in 0..10 {
+                        for ld_j in 0..3 {
+                            let gj = dof_mgr.global_dof(elem.nodes[j], ld_j);
+                            triplets.add_triplet(gi, gj, K_elem[(3 * i + ld_i, 3 * j + ld_j)]);
                         }
                     }
                 }
@@ -575,15 +656,13 @@ impl Assembler {
 
         // Loop over all elements
         for elem in &mesh.connectivity.tet10_elements {
-            let vertices = [
-                mesh.geometry.nodes[elem.vertices()[0]],
-                mesh.geometry.nodes[elem.vertices()[1]],
-                mesh.geometry.nodes[elem.vertices()[2]],
-                mesh.geometry.nodes[elem.vertices()[3]],
-            ];
+            let mut nodes = [Point3::origin(); 10];
+            for i in 0..10 {
+                nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+            }
 
             // Compute element load vector
-            let f_elem = crate::mechanics::BodyForce::gravity_load(&vertices, density, gravity);
+            let f_elem = crate::mechanics::BodyForce::gravity_load(&nodes, density, gravity);
 
             // Assemble into global vector
             for i in 0..10 {
@@ -595,6 +674,89 @@ impl Assembler {
         }
 
         f_global
+    }
+
+    /// Assemble global system for Maxwell viscoelasticity (parallel)
+    ///
+    /// Returns (K_global, f_history_global) where:
+    /// - K_global: Effective stiffness matrix (SPD)
+    /// - f_history_global: Force vector from stress history
+    ///
+    /// Uses Rayon for parallel element computation.
+    ///
+    /// # Arguments
+    /// * `mesh` - Mesh with stress_history populated
+    /// * `dof_mgr` - DOF manager (3 DOF/node)
+    /// * `material` - Maxwell material properties
+    /// * `dt` - Time step size
+    ///
+    /// # Panics
+    /// Panics if mesh.stress_history is None or if dofs_per_node != 3
+    ///
+    /// # References
+    /// - Zienkiewicz & Taylor, "The Finite Element Method", Vol. 2
+    #[allow(non_snake_case)]
+    pub fn assemble_maxwell_viscoelastic_parallel(
+        mesh: &Mesh,
+        dof_mgr: &DofManager,
+        material: &crate::mechanics::MaxwellViscoelasticity,
+        dt: f64,
+    ) -> (CsMat<f64>, Vec<f64>) {
+        assert_eq!(dof_mgr.dofs_per_node(), 3, "Maxwell viscoelasticity requires 3 DOF per node");
+
+        let stress_history = mesh.stress_history.as_ref()
+            .expect("Mesh must have stress_history for viscoelasticity");
+
+        let n_dofs = dof_mgr.total_dofs();
+
+        // Parallel element computation
+        let elem_results: Vec<_> = mesh
+            .connectivity
+            .tet10_elements
+            .par_iter()
+            .enumerate()
+            .map(|(elem_id, elem)| {
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 {
+                    nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+                }
+
+                let stress_n = stress_history.get(elem_id);
+
+                crate::mechanics::ElasticityElement::maxwell_viscoelastic(&nodes, material, dt, stress_n)
+            })
+            .collect();
+
+        // Sequential assembly
+        let mut triplets = TriMat::new((n_dofs, n_dofs));
+        let mut f_history = vec![0.0; n_dofs];
+
+        for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let (K_elem, f_elem) = &elem_results[elem_idx];
+
+            // Scatter stiffness matrix
+            for i in 0..10 {
+                for local_dof_i in 0..3 {
+                    let global_i = dof_mgr.global_dof(elem.nodes[i], local_dof_i);
+
+                    for j in 0..10 {
+                        for local_dof_j in 0..3 {
+                            let global_j = dof_mgr.global_dof(elem.nodes[j], local_dof_j);
+                            let elem_row = 3 * i + local_dof_i;
+                            let elem_col = 3 * j + local_dof_j;
+
+                            triplets.add_triplet(global_i, global_j, K_elem[(elem_row, elem_col)]);
+                        }
+                    }
+
+                    // Scatter history force
+                    let elem_row = 3 * i + local_dof_i;
+                    f_history[global_i] += f_elem[elem_row];
+                }
+            }
+        }
+
+        (triplets.to_csr(), f_history)
     }
 }
 

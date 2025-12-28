@@ -40,3 +40,15 @@ path = "benchmarks/elasticity_patch_test.rs"
 [[bin]]
 name = "viscous_couette_flow"
 path = "benchmarks/viscous_couette_flow.rs"
+
+[[bin]]
+name = "maxwell_stress_relaxation"
+path = "benchmarks/maxwell_stress_relaxation.rs"
+
+[[bin]]
+name = "convergence_test"
+path = "benchmarks/convergence_test.rs"
+
+[[bin]]
+name = "plastic_shear_banding"
+path = "benchmarks/plastic_shear_banding.rs"

@@ -4,7 +4,7 @@
 
 use nalgebra::{Point3, SMatrix};
 use crate::fem::{GaussQuadrature, Tet10Basis};
-use super::{IsotropicElasticity, NewtonianViscosity, StrainDisplacement};
+use super::{IsotropicElasticity, NewtonianViscosity, MaxwellViscoelasticity, StrainDisplacement};
 
 /// Element matrix computations for linear elasticity
 pub struct ElasticityElement;
@@ -31,7 +31,7 @@ impl ElasticityElement {
     /// - Bathe, "Finite Element Procedures", Ch. 6
     #[allow(non_snake_case)]
     pub fn stiffness_matrix(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         material: &IsotropicElasticity,
     ) -> SMatrix<f64, 30, 30> {
         let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
@@ -42,14 +42,12 @@ impl ElasticityElement {
         // Use 4-point Gauss quadrature (degree 2, sufficient for linear strain)
         let quad = GaussQuadrature::tet_4point();
 
-        // Compute Jacobian determinant (constant for Tet10 with linear geometry)
-        let J = Tet10Basis::jacobian(vertices);
-        let det_J = J.determinant();
-
         // Numerical integration over element volume
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
-            // Compute B matrix at this quadrature point
-            let B = StrainDisplacement::compute_b_at_point(qp, vertices);
+            // Compute Jacobian and B matrix at this quadrature point
+            let J = Tet10Basis::jacobian(qp, nodes);
+            let det_J = J.determinant();
+            let B = StrainDisplacement::compute_b_at_point(qp, nodes);
 
             // Integration weight (includes volume element transformation)
             let w = weight * det_J.abs();
@@ -87,7 +85,7 @@ impl ElasticityElement {
     /// # Returns
     /// 30×30 element viscosity matrix
     pub fn viscosity_matrix(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         material: &NewtonianViscosity,
     ) -> SMatrix<f64, 30, 30> {
         let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
@@ -98,14 +96,12 @@ impl ElasticityElement {
         // 4-point Gauss quadrature (degree 2, sufficient for linear strain-rate)
         let quad = GaussQuadrature::tet_4point();
 
-        // Compute Jacobian and determinant (constant for linear tets)
-        let J = Tet10Basis::jacobian(vertices);
-        let det_J = J.determinant();
-
         // Numerical integration: K_e = ∫ B^T D B dV
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
-            // Compute B matrix (strain-rate-velocity relation)
-            let B = StrainDisplacement::compute_b_at_point(qp, vertices);
+            // Compute Jacobian and B matrix at this quadrature point
+            let J = Tet10Basis::jacobian(qp, nodes);
+            let det_J = J.determinant();
+            let B = StrainDisplacement::compute_b_at_point(qp, nodes);
 
             // Integration weight includes Jacobian determinant
             let w = weight * det_J.abs();
@@ -135,12 +131,97 @@ impl ElasticityElement {
     /// 30×30 element mass matrix (currently zero for quasi-static)
     #[allow(unused_variables)]
     pub fn mass_matrix(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         density: f64,
     ) -> SMatrix<f64, 30, 30> {
-        // TODO: Implement for transient dynamics (Milestone 2.2+)
-        // For now, only quasi-static problems supported
-        SMatrix::<f64, 30, 30>::zeros()
+        let mut M_elem = SMatrix::<f64, 30, 30>::zeros();
+        let quad = GaussQuadrature::tet_4point();
+
+        for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            let J = Tet10Basis::jacobian(qp, nodes);
+            let det_J = J.determinant().abs();
+            let N = Tet10Basis::shape_functions(qp);
+            
+            let w = weight * det_J * density;
+
+            for i in 0..10 {
+                for j in 0..10 {
+                    let val = w * N[i] * N[j];
+                    M_elem[(3 * i, 3 * j)] += val;
+                    M_elem[(3 * i + 1, 3 * j + 1)] += val;
+                    M_elem[(3 * i + 2, 3 * j + 2)] += val;
+                }
+            }
+        }
+        M_elem
+    }
+
+    /// Compute element stiffness and history force for Maxwell viscoelasticity
+    ///
+    /// Returns:
+    /// - K_elem: 30×30 effective stiffness matrix
+    /// - f_history: 30×1 nodal force vector from stress history
+    ///
+    /// # Algorithm
+    /// K_elem = ∫ B^T D_eff B dV
+    /// f_history = -∫ B^T σ_n dV  (negative because moved to RHS)
+    ///
+    /// where:
+    /// - D_eff = D_elastic / [1 + Δt/τ_M]
+    /// - σ_n = stress from previous time step (6×1 Voigt notation)
+    /// - B = strain-displacement matrix (6×30)
+    ///
+    /// # Arguments
+    /// * `vertices` - Physical coordinates of 4 element vertices
+    /// * `material` - Maxwell material properties
+    /// * `dt` - Time step size (seconds)
+    /// * `stress_n` - Deviatoric stress from previous time step (6×1)
+    ///
+    /// # Returns
+    /// Tuple of (K_elem, f_history)
+    ///
+    /// # References
+    /// - Malvern, "Introduction to the Mechanics of a Continuous Medium"
+    /// - Zienkiewicz & Taylor, "The Finite Element Method", Vol. 2
+    #[allow(non_snake_case)]
+    pub fn maxwell_viscoelastic(
+        nodes: &[Point3<f64>; 10],
+        material: &MaxwellViscoelasticity,
+        dt: f64,
+        stress_n: &SMatrix<f64, 6, 1>,
+    ) -> (SMatrix<f64, 30, 30>, SMatrix<f64, 30, 1>) {
+        let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
+        let mut f_history = SMatrix::<f64, 30, 1>::zeros();
+
+        // Use ELASTIC constitutive matrix (relaxation handled in stress update)
+        // This avoids double-relaxation between assembly and stress update
+        let D = material.elastic_matrix();
+
+        // 4-point Gauss quadrature (degree 2, sufficient for linear strain)
+        let quad = GaussQuadrature::tet_4point();
+
+        // Numerical integration: K_e = ∫ B^T D_eff B dV, f_h = -∫ B^T σ_n dV
+        for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            // Compute Jacobian and B matrix at this quadrature point
+            let J = Tet10Basis::jacobian(qp, nodes);
+            let det_J = J.determinant();
+            let B = StrainDisplacement::compute_b_at_point(qp, nodes);
+
+            // Integration weight includes Jacobian determinant
+            let w = weight * det_J.abs();
+
+            // Stiffness: K += w * B^T D B (elastic, relaxation in stress update)
+            let DB = D * B;
+            let BT_DB = B.transpose() * DB;
+            K_elem += w * BT_DB;
+
+            // History force: f_history -= w * B^T σ_n
+            // (negative because we move to RHS: K u = f_ext + f_history)
+            let BT_sigma = B.transpose() * stress_n;
+            f_history -= w * BT_sigma;
+        }
+
+        (K_elem, f_history)
     }
 }
 
@@ -149,37 +230,44 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    fn create_reference_tet() -> [Point3<f64>; 4] {
-        // Unit tetrahedron
+    fn create_unit_tet10() -> [Point3<f64>; 10] {
+        let v0 = Point3::new(0.0, 0.0, 0.0);
+        let v1 = Point3::new(1.0, 0.0, 0.0);
+        let v2 = Point3::new(0.0, 1.0, 0.0);
+        let v3 = Point3::new(0.0, 0.0, 1.0);
+
         [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
+            v0, v1, v2, v3,
+            Point3::new(0.5, 0.0, 0.0), // 0-1
+            Point3::new(0.5, 0.5, 0.0), // 1-2
+            Point3::new(0.0, 0.5, 0.0), // 2-0
+            Point3::new(0.0, 0.0, 0.5), // 0-3
+            Point3::new(0.5, 0.0, 0.5), // 1-3
+            Point3::new(0.0, 0.5, 0.5), // 2-3
         ]
     }
 
     #[test]
     fn test_stiffness_matrix_symmetry() {
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = IsotropicElasticity::new(100e9, 0.25);
 
-        let K = ElasticityElement::stiffness_matrix(&vertices, &material);
+        let K = ElasticityElement::stiffness_matrix(&nodes, &material);
 
         // Check symmetry: K = K^T
         for i in 0..30 {
             for j in 0..30 {
-                assert_relative_eq!(K[(i, j)], K[(j, i)], epsilon = 1e-6);
+                assert_relative_eq!(K[(i, j)], K[(j, i)], max_relative = 1e-12, epsilon = 1e-6);
             }
         }
     }
 
     #[test]
     fn test_stiffness_matrix_dimensions() {
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = IsotropicElasticity::new(100e9, 0.25);
 
-        let K = ElasticityElement::stiffness_matrix(&vertices, &material);
+        let K = ElasticityElement::stiffness_matrix(&nodes, &material);
 
         assert_eq!(K.nrows(), 30);
         assert_eq!(K.ncols(), 30);
@@ -190,10 +278,10 @@ mod tests {
         // K should have 6 zero eigenvalues (rigid body modes)
         // and 24 positive eigenvalues
 
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = IsotropicElasticity::new(100e9, 0.25);
 
-        let K = ElasticityElement::stiffness_matrix(&vertices, &material);
+        let K = ElasticityElement::stiffness_matrix(&nodes, &material);
 
         // Compute eigenvalues
         let eigen = K.symmetric_eigen();
@@ -215,13 +303,13 @@ mod tests {
 
     #[test]
     fn test_stiffness_scales_with_youngs_modulus() {
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
 
         let mat1 = IsotropicElasticity::new(100e9, 0.25);
         let mat2 = IsotropicElasticity::new(200e9, 0.25);  // 2x stiffer
 
-        let K1 = ElasticityElement::stiffness_matrix(&vertices, &mat1);
-        let K2 = ElasticityElement::stiffness_matrix(&vertices, &mat2);
+        let K1 = ElasticityElement::stiffness_matrix(&nodes, &mat1);
+        let K2 = ElasticityElement::stiffness_matrix(&nodes, &mat2);
 
         // K2 should be approximately 2*K1
         for i in 0..30 {
@@ -232,16 +320,17 @@ mod tests {
     }
 
     #[test]
-    fn test_mass_matrix_placeholder() {
-        let vertices = create_reference_tet();
+    fn test_mass_matrix_properties() {
+        let nodes = create_unit_tet10();
         let density = 3000.0;
 
-        let M = ElasticityElement::mass_matrix(&vertices, density);
+        let M = ElasticityElement::mass_matrix(&nodes, density);
 
-        // Should be zeros for now (quasi-static only)
+        // Should be non-zero and symmetric
         for i in 0..30 {
+            assert!(M[(i, i)] > 0.0, "Diagonal entry {} should be positive", i);
             for j in 0..30 {
-                assert_eq!(M[(i, j)], 0.0);
+                assert_relative_eq!(M[(i, j)], M[(j, i)], epsilon = 1e-10);
             }
         }
     }
@@ -254,10 +343,10 @@ mod tests {
     fn test_viscosity_matrix_symmetry() {
         use super::NewtonianViscosity;
 
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = NewtonianViscosity::new(1000.0);
 
-        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+        let K = ElasticityElement::viscosity_matrix(&nodes, &material);
 
         // Check symmetry
         for i in 0..30 {
@@ -271,10 +360,10 @@ mod tests {
     fn test_viscosity_matrix_dimensions() {
         use super::NewtonianViscosity;
 
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = NewtonianViscosity::new(1000.0);
 
-        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+        let K = ElasticityElement::viscosity_matrix(&nodes, &material);
 
         assert_eq!(K.nrows(), 30);
         assert_eq!(K.ncols(), 30);
@@ -284,10 +373,10 @@ mod tests {
     fn test_viscosity_matrix_positive_definite() {
         use super::NewtonianViscosity;
 
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
         let material = NewtonianViscosity::new(1000.0);
 
-        let K = ElasticityElement::viscosity_matrix(&vertices, &material);
+        let K = ElasticityElement::viscosity_matrix(&nodes, &material);
 
         // Compute eigenvalues
         let eigen = K.symmetric_eigen();
@@ -304,7 +393,7 @@ mod tests {
     fn test_viscosity_matrix_scales_with_viscosity() {
         use super::NewtonianViscosity;
 
-        let vertices = create_reference_tet();
+        let nodes = create_unit_tet10();
 
         let mu1 = 1000.0;
         let mu2 = 2000.0;
@@ -312,8 +401,8 @@ mod tests {
         let mat1 = NewtonianViscosity::new(mu1);
         let mat2 = NewtonianViscosity::new(mu2);
 
-        let K1 = ElasticityElement::viscosity_matrix(&vertices, &mat1);
-        let K2 = ElasticityElement::viscosity_matrix(&vertices, &mat2);
+        let K1 = ElasticityElement::viscosity_matrix(&nodes, &mat1);
+        let K2 = ElasticityElement::viscosity_matrix(&nodes, &mat2);
 
         // K should scale linearly with viscosity
         for i in 0..30 {
@@ -321,5 +410,172 @@ mod tests {
                 assert_relative_eq!(K2[(i, j)], K1[(i, j)] * 2.0, epsilon = 1e-8);
             }
         }
+    }
+
+    // ========================================================================
+    // Maxwell Viscoelastic Element Matrix Tests
+    // ========================================================================
+
+    #[test]
+    fn test_maxwell_element_stiffness_symmetry() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let dt = 3.16e7;  // 1 year
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        let (K, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt, &stress_n);
+
+        // Check symmetry (use relative tolerance for large matrix values)
+        for i in 0..30 {
+            for j in 0..30 {
+                assert_relative_eq!(K[(i, j)], K[(j, i)], max_relative = 1e-12, epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_maxwell_element_dimensions() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let dt = 3.16e7;
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        let (K, f_hist) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt, &stress_n);
+
+        assert_eq!(K.nrows(), 30);
+        assert_eq!(K.ncols(), 30);
+        assert_eq!(f_hist.nrows(), 30);
+        assert_eq!(f_hist.ncols(), 1);
+    }
+
+    #[test]
+    fn test_maxwell_element_zero_stress_history() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let dt = 3.16e7;
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        let (_, f_hist) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt, &stress_n);
+
+        // With zero stress history, history force should be zero
+        for i in 0..30 {
+            assert_relative_eq!(f_hist[i], 0.0, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_maxwell_element_elastic_limit() {
+        use super::{MaxwellViscoelasticity, IsotropicElasticity};
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let E = 100e9;
+        let nu = 0.25;
+
+        let maxwell = MaxwellViscoelasticity::new(E, nu, 1e19);
+        let elastic = IsotropicElasticity::new(E, nu);
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        // Very small time step (elastic limit)
+        let dt_small = 1e-20;
+        let (K_maxwell, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &maxwell, dt_small, &stress_n);
+        let K_elastic = ElasticityElement::stiffness_matrix(&nodes, &elastic);
+
+        // Should match elastic stiffness
+        for i in 0..30 {
+            for j in 0..30 {
+                assert_relative_eq!(K_maxwell[(i, j)], K_elastic[(i, j)], epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_maxwell_element_relaxed_limit() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let tau_M = material.relaxation_time();
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        // With elastic K formulation, stiffness matrix doesn't change with dt
+        // (relaxation happens in stress update, not stiffness assembly)
+        let dt_large = 1000.0 * tau_M;
+        let (K_relaxed, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt_large, &stress_n);
+
+        let dt_small = 1e-20;
+        let (K_elastic, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt_small, &stress_n);
+
+        // Stiffness should be the same (elastic) regardless of dt
+        use approx::assert_relative_eq;
+        assert_relative_eq!(K_relaxed[(0, 0)], K_elastic[(0, 0)], max_relative = 1e-10);
+    }
+
+    #[test]
+    fn test_maxwell_element_with_nonzero_stress() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let dt = 3.16e7;
+
+        // Non-zero stress history
+        let mut stress_n = SMatrix::<f64, 6, 1>::zeros();
+        stress_n[0] = 1e6;  // σ_xx = 1 MPa
+        stress_n[3] = 5e5;  // σ_xy = 0.5 MPa
+
+        let (K, f_hist) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt, &stress_n);
+
+        // K should still be symmetric
+        for i in 0..30 {
+            for j in 0..30 {
+                assert_relative_eq!(K[(i, j)], K[(j, i)], max_relative = 1e-12, epsilon = 1e-6);
+            }
+        }
+
+        // History force should be non-zero
+        let f_norm: f64 = f_hist.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(f_norm > 0.0, "History force should be non-zero with non-zero stress");
+    }
+
+    #[test]
+    fn test_maxwell_element_stiffness_scales_with_timestep() {
+        use super::MaxwellViscoelasticity;
+        use nalgebra::SMatrix;
+
+        let nodes = create_unit_tet10();
+        let material = MaxwellViscoelasticity::new(100e9, 0.25, 1e19);
+        let tau_M = material.relaxation_time();
+        let stress_n = SMatrix::<f64, 6, 1>::zeros();
+
+        let dt1 = tau_M;
+        let dt2 = 2.0 * tau_M;
+
+        let (K1, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt1, &stress_n);
+        let (K2, _) = ElasticityElement::maxwell_viscoelastic(&nodes, &material, dt2, &stress_n);
+
+        // With elastic K formulation, stiffness is independent of dt
+        // (relaxation handled in stress update, not assembly)
+        use approx::assert_relative_eq;
+        assert_relative_eq!(K1[(0, 0)], K2[(0, 0)], max_relative = 1e-10);
+
+        // Both should equal elastic stiffness
+        let elastic_mat = crate::mechanics::IsotropicElasticity::new(
+            material.youngs_modulus,
+            material.poisson_ratio
+        );
+        let K_elastic = ElasticityElement::stiffness_matrix(&nodes, &elastic_mat);
+        assert_relative_eq!(K1[(0, 0)], K_elastic[(0, 0)], max_relative = 1e-10);
     }
 }

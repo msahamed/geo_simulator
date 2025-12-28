@@ -47,7 +47,7 @@ impl BodyForce {
     /// ```
     #[allow(non_snake_case)]
     pub fn gravity_load(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         density: f64,
         gravity: &Vector3<f64>,
     ) -> SVector<f64, 30> {
@@ -56,10 +56,6 @@ impl BodyForce {
         // Use 4-point Gaussian quadrature
         let quad = GaussQuadrature::tet_4point();
 
-        // Compute Jacobian determinant for volume transformation
-        let J = Tet10Basis::jacobian(vertices);
-        let det_J = J.determinant();
-
         // Body force per unit volume (force density)
         let body_force = density * gravity;
 
@@ -67,6 +63,10 @@ impl BodyForce {
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
             // Evaluate shape functions at quadrature point
             let N = Tet10Basis::shape_functions(qp);
+
+            // Compute Jacobian determinant for volume transformation
+            let J = Tet10Basis::jacobian(qp, nodes);
+            let det_J = J.determinant();
 
             // Integration weight (includes volume element)
             let w = weight * det_J.abs();
@@ -88,8 +88,8 @@ impl BodyForce {
     /// V = |det(J)| / 6
     ///
     /// Useful for validating that total force equals weight.
-    pub fn element_volume(vertices: &[Point3<f64>; 4]) -> f64 {
-        Tet10Basis::element_volume(vertices)
+    pub fn element_volume(nodes: &[Point3<f64>; 10]) -> f64 {
+        Tet10Basis::element_volume(nodes)
     }
 }
 
@@ -98,12 +98,20 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
-    fn create_unit_tet() -> [Point3<f64>; 4] {
+    fn create_unit_tet10() -> [Point3<f64>; 10] {
+        let v0 = Point3::new(0.0, 0.0, 0.0);
+        let v1 = Point3::new(1.0, 0.0, 0.0);
+        let v2 = Point3::new(0.0, 1.0, 0.0);
+        let v3 = Point3::new(0.0, 0.0, 1.0);
+
         [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
+            v0, v1, v2, v3,
+            Point3::new(0.5, 0.0, 0.0), // 0-1
+            Point3::new(0.5, 0.5, 0.0), // 1-2
+            Point3::new(0.0, 0.5, 0.0), // 2-0
+            Point3::new(0.0, 0.0, 0.5), // 0-3
+            Point3::new(0.5, 0.0, 0.5), // 1-3
+            Point3::new(0.0, 0.5, 0.5), // 2-3
         ]
     }
 
@@ -111,18 +119,18 @@ mod tests {
     fn test_gravity_load_total_equals_weight() {
         // Total force should equal element weight: ρ V g
 
-        let vertices = create_unit_tet();
+        let nodes = create_unit_tet10();
         let density = 3000.0;  // kg/m³
         let g_mag = 9.81;      // m/s²
         let gravity = Vector3::new(0.0, 0.0, -g_mag);
 
-        let f = BodyForce::gravity_load(&vertices, density, &gravity);
+        let f = BodyForce::gravity_load(&nodes, density, &gravity);
 
         // Sum all z-components (vertical forces)
         let total_fz: f64 = (0..10).map(|i| f[3 * i + 2]).sum();
 
         // Expected: -ρ V g (negative because gravity points down)
-        let volume = BodyForce::element_volume(&vertices);
+        let volume = BodyForce::element_volume(&nodes);
         let expected_weight = -density * volume * g_mag;
 
         assert_relative_eq!(total_fz, expected_weight, epsilon = 1e-6);
@@ -130,11 +138,11 @@ mod tests {
 
     #[test]
     fn test_gravity_load_dimensions() {
-        let vertices = create_unit_tet();
+        let nodes = create_unit_tet10();
         let density = 3000.0;
         let gravity = Vector3::new(0.0, 0.0, -9.81);
 
-        let f = BodyForce::gravity_load(&vertices, density, &gravity);
+        let f = BodyForce::gravity_load(&nodes, density, &gravity);
 
         assert_eq!(f.len(), 30);
     }
@@ -143,18 +151,18 @@ mod tests {
     fn test_gravity_load_x_direction() {
         // Gravity in x-direction should only affect x-components
 
-        let vertices = create_unit_tet();
+        let nodes = create_unit_tet10();
         let density = 3000.0;
         let gravity = Vector3::new(9.81, 0.0, 0.0);
 
-        let f = BodyForce::gravity_load(&vertices, density, &gravity);
+        let f = BodyForce::gravity_load(&nodes, density, &gravity);
 
         // Sum forces in each direction
         let total_fx: f64 = (0..10).map(|i| f[3 * i + 0]).sum();
         let total_fy: f64 = (0..10).map(|i| f[3 * i + 1]).sum();
         let total_fz: f64 = (0..10).map(|i| f[3 * i + 2]).sum();
 
-        let volume = BodyForce::element_volume(&vertices);
+        let volume = BodyForce::element_volume(&nodes);
         let expected = density * volume * 9.81;
 
         assert_relative_eq!(total_fx, expected, epsilon = 1e-6);
@@ -164,11 +172,11 @@ mod tests {
 
     #[test]
     fn test_zero_gravity() {
-        let vertices = create_unit_tet();
+        let nodes = create_unit_tet10();
         let density = 3000.0;
         let gravity = Vector3::new(0.0, 0.0, 0.0);
 
-        let f = BodyForce::gravity_load(&vertices, density, &gravity);
+        let f = BodyForce::gravity_load(&nodes, density, &gravity);
 
         // All components should be zero
         for i in 0..30 {
@@ -180,11 +188,11 @@ mod tests {
     fn test_force_distribution() {
         // Forces should be distributed to all nodes (not concentrated)
 
-        let vertices = create_unit_tet();
+        let nodes = create_unit_tet10();
         let density = 3000.0;
         let gravity = Vector3::new(0.0, 0.0, -9.81);
 
-        let f = BodyForce::gravity_load(&vertices, density, &gravity);
+        let f = BodyForce::gravity_load(&nodes, density, &gravity);
 
         // All nodes should have some non-zero z-force
         for i in 0..10 {
@@ -196,8 +204,8 @@ mod tests {
     #[test]
     fn test_element_volume() {
         // Unit tetrahedron should have volume = 1/6
-        let vertices = create_unit_tet();
-        let volume = BodyForce::element_volume(&vertices);
+        let nodes = create_unit_tet10();
+        let volume = BodyForce::element_volume(&nodes);
 
         assert_relative_eq!(volume, 1.0 / 6.0, epsilon = 1e-10);
     }

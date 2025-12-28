@@ -21,7 +21,7 @@ impl ElementMatrix {
     /// # Returns
     /// 10×10 element stiffness matrix (symmetric)
     pub fn thermal_stiffness(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         conductivity: f64,
     ) -> SMatrix<f64, 10, 10> {
         let mut k_elem = SMatrix::<f64, 10, 10>::zeros();
@@ -33,10 +33,10 @@ impl ElementMatrix {
         #[allow(non_snake_case)]
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
             // Evaluate shape function derivatives at quadrature point
-            let dN_dx = Tet10Basis::shape_derivatives_cartesian(qp, vertices);
+            let dN_dx = Tet10Basis::shape_derivatives_cartesian(qp, nodes);
 
             // Compute Jacobian determinant for volume element
-            let J = Tet10Basis::jacobian(vertices);
+            let J = Tet10Basis::jacobian(qp, nodes);
             let det_J = J.determinant();
 
             // Integration weight (includes volume element)
@@ -72,7 +72,7 @@ impl ElementMatrix {
     /// # Returns
     /// 10×10 element mass matrix (symmetric)
     pub fn thermal_mass(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         density: f64,
         specific_heat: f64,
     ) -> SMatrix<f64, 10, 10> {
@@ -89,7 +89,7 @@ impl ElementMatrix {
             let N = Tet10Basis::shape_functions(qp);
 
             // Jacobian determinant
-            let J = Tet10Basis::jacobian(vertices);
+            let J = Tet10Basis::jacobian(qp, nodes);
             let det_J = J.determinant();
             let w = weight * det_J.abs();
 
@@ -115,7 +115,7 @@ impl ElementMatrix {
     /// # Returns
     /// 10×1 element load vector
     pub fn thermal_load(
-        vertices: &[Point3<f64>; 4],
+        nodes: &[Point3<f64>; 10],
         source: f64,
     ) -> [f64; 10] {
         let mut f_elem = [0.0; 10];
@@ -126,7 +126,7 @@ impl ElementMatrix {
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
             let N = Tet10Basis::shape_functions(qp);
 
-            let J = Tet10Basis::jacobian(vertices);
+            let J = Tet10Basis::jacobian(qp, nodes);
             let det_J = J.determinant();
             let w = weight * det_J.abs();
 
@@ -145,18 +145,29 @@ mod tests {
     use super::*;
     use approx::assert_relative_eq;
 
+    fn create_unit_tet10() -> [Point3<f64>; 10] {
+        let v0 = Point3::new(0.0, 0.0, 0.0);
+        let v1 = Point3::new(1.0, 0.0, 0.0);
+        let v2 = Point3::new(0.0, 1.0, 0.0);
+        let v3 = Point3::new(0.0, 0.0, 1.0);
+
+        [
+            v0, v1, v2, v3,
+            Point3::new(0.5, 0.0, 0.0), // 0-1
+            Point3::new(0.5, 0.5, 0.0), // 1-2
+            Point3::new(0.0, 0.5, 0.0), // 2-0
+            Point3::new(0.0, 0.0, 0.5), // 0-3
+            Point3::new(0.5, 0.0, 0.5), // 1-3
+            Point3::new(0.0, 0.5, 0.5), // 2-3
+        ]
+    }
+
     #[test]
     fn test_stiffness_symmetry() {
-        // Reference tetrahedron
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
         let k = 1.0; // conductivity
-        let K = ElementMatrix::thermal_stiffness(&vertices, k);
+        let K = ElementMatrix::thermal_stiffness(&nodes, k);
 
         // Check symmetry
         for i in 0..10 {
@@ -168,15 +179,10 @@ mod tests {
 
     #[test]
     fn test_stiffness_positive_definiteness() {
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
         let k = 1.0;
-        let K = ElementMatrix::thermal_stiffness(&vertices, k);
+        let K = ElementMatrix::thermal_stiffness(&nodes, k);
 
         // Check positive definiteness by checking diagonal entries
         // For a well-formed element, diagonal should be positive
@@ -193,14 +199,9 @@ mod tests {
 
     #[test]
     fn test_mass_matrix_symmetry() {
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
-        let M = ElementMatrix::thermal_mass(&vertices, 1.0, 1.0);
+        let M = ElementMatrix::thermal_mass(&nodes, 1.0, 1.0);
 
         // Check symmetry
         for i in 0..10 {
@@ -212,18 +213,13 @@ mod tests {
 
     #[test]
     fn test_load_vector_sum() {
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
         let Q = 6.0; // source term
-        let f = ElementMatrix::thermal_load(&vertices, Q);
+        let f = ElementMatrix::thermal_load(&nodes, Q);
 
         // Sum should equal Q * volume
-        let volume = Tet10Basis::element_volume(&vertices);
+        let volume = Tet10Basis::element_volume(&nodes);
         let sum: f64 = f.iter().sum();
 
         assert_relative_eq!(sum, Q * volume, epsilon = 1e-12);

@@ -6,6 +6,23 @@ use geo_simulator::{Tet10Basis};
 use nalgebra::Point3;
 use approx::assert_relative_eq;
 
+fn generate_nodes(vertices: &[Point3<f64>; 4]) -> [Point3<f64>; 10] {
+    let v0 = vertices[0];
+    let v1 = vertices[1];
+    let v2 = vertices[2];
+    let v3 = vertices[3];
+
+    [
+        v0, v1, v2, v3,
+        Point3::new((v0.x + v1.x) * 0.5, (v0.y + v1.y) * 0.5, (v0.z + v1.z) * 0.5),
+        Point3::new((v1.x + v2.x) * 0.5, (v1.y + v2.y) * 0.5, (v1.z + v2.z) * 0.5),
+        Point3::new((v2.x + v0.x) * 0.5, (v2.y + v0.y) * 0.5, (v2.z + v0.z) * 0.5),
+        Point3::new((v0.x + v3.x) * 0.5, (v0.y + v3.y) * 0.5, (v0.z + v3.z) * 0.5),
+        Point3::new((v1.x + v3.x) * 0.5, (v1.y + v3.y) * 0.5, (v1.z + v3.z) * 0.5),
+        Point3::new((v2.x + v3.x) * 0.5, (v2.y + v3.y) * 0.5, (v2.z + v3.z) * 0.5),
+    ]
+}
+
 #[test]
 fn benchmark_partition_of_unity() {
     println!("\n=== Benchmark: Partition of Unity ===");
@@ -157,7 +174,8 @@ fn benchmark_derivative_sum() {
     ];
 
     for coords in &test_coords {
-        let derivs = Tet10Basis::shape_derivatives_cartesian(coords, &vertices);
+        let nodes = generate_nodes(&vertices);
+        let derivs = Tet10Basis::shape_derivatives_cartesian(coords, &nodes);
 
         let sum_dx: f64 = derivs.iter().map(|d| d[0]).sum();
         let sum_dy: f64 = derivs.iter().map(|d| d[1]).sum();
@@ -216,7 +234,8 @@ fn benchmark_jacobian_volume() {
     ];
 
     for (name, vertices, expected_volume) in test_cases {
-        let computed_volume = Tet10Basis::element_volume(&vertices);
+        let nodes = generate_nodes(&vertices);
+        let computed_volume = Tet10Basis::element_volume(&nodes);
         let error = (computed_volume - expected_volume).abs();
 
         println!("  {}: V = {:.15} (expected {:.15}), error = {:.2e}",

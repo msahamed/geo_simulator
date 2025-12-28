@@ -1,6 +1,7 @@
 use nalgebra::Point3;
 use super::topology::Connectivity;
 use super::fields::FieldData;
+use super::state::StressHistory;
 
 /// Geometric information for the mesh
 #[derive(Debug, Clone)]
@@ -41,6 +42,10 @@ pub struct Mesh {
     pub geometry: Geometry,
     pub connectivity: Connectivity,
     pub field_data: FieldData,
+    /// Stress history for viscoelastic simulations
+    pub stress_history: Option<StressHistory>,
+    /// Plasticity state for strain softening
+    pub plasticity_state: Option<super::state::PlasticityState>,
 }
 
 impl Mesh {
@@ -49,6 +54,8 @@ impl Mesh {
             geometry: Geometry::new(),
             connectivity: Connectivity::new(),
             field_data: FieldData::new(),
+            stress_history: None,
+            plasticity_state: None,
         }
     }
 

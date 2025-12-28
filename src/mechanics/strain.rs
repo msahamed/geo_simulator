@@ -70,25 +70,42 @@ impl StrainDisplacement {
         B
     }
 
-    /// Compute B-matrix at a quadrature point in physical element
-    ///
-    /// Convenience method that computes shape derivatives and builds B-matrix.
+    /// Compute B-matrix at a quadrature point in physical element (Isoparametric)
     ///
     /// # Arguments
-    /// * `barycentric` - Barycentric coordinates [L0, L1, L2, L3] of quadrature point
-    /// * `vertices` - Physical coordinates of the 4 element vertices
-    ///
-    /// # Returns
-    /// B matrix (6×30) at the given quadrature point
+    /// * `barycentric` - Barycentric coordinates [L0, L1, L2, L3]
+    /// * `nodes` - All 10 node coordinates
     #[allow(non_snake_case)]
     pub fn compute_b_at_point(
         barycentric: &[f64; 4],
+        nodes: &[Point3<f64>; 10],
+    ) -> SMatrix<f64, 6, 30> {
+        let dN_dx = Tet10Basis::shape_derivatives_cartesian(barycentric, nodes);
+        Self::compute_b_matrix(&dN_dx)
+    }
+
+    /// Compute B-matrix using linear mapping (Faster, accurate for straight-edged elements)
+    ///
+    /// # Arguments
+    /// * `barycentric` - Barycentric coordinates
+    /// * `vertices` - Only the 4 corner vertices
+    #[allow(non_snake_case)]
+    pub fn compute_b_at_point_linear(
+        barycentric: &[f64; 4],
         vertices: &[Point3<f64>; 4],
     ) -> SMatrix<f64, 6, 30> {
-        // Get shape function derivatives in Cartesian coordinates
-        let dN_dx = Tet10Basis::shape_derivatives_cartesian(barycentric, vertices);
+        let dN_dL = Tet10Basis::shape_derivatives_barycentric(barycentric);
+        let J = Tet10Basis::jacobian_linear(vertices);
+        let J_inv = J.try_inverse().expect("Singular linear Jacobian");
 
-        // Build B-matrix
+        let mut dN_dx = [[0.0; 3]; 10];
+        for i in 0..10 {
+            let dN_dL1 = dN_dL[i][1] - dN_dL[i][0];
+            let dN_dL2 = dN_dL[i][2] - dN_dL[i][0];
+            let dN_dL3 = dN_dL[i][3] - dN_dL[i][0];
+            let grad = J_inv.transpose() * nalgebra::Vector3::new(dN_dL1, dN_dL2, dN_dL3);
+            dN_dx[i] = [grad[0], grad[1], grad[2]];
+        }
         Self::compute_b_matrix(&dN_dx)
     }
 }
@@ -99,21 +116,33 @@ mod tests {
     use approx::assert_relative_eq;
     use nalgebra::SVector;
 
+    fn create_unit_tet10() -> [Point3<f64>; 10] {
+        let v0 = Point3::new(0.0, 0.0, 0.0);
+        let v1 = Point3::new(1.0, 0.0, 0.0);
+        let v2 = Point3::new(0.0, 1.0, 0.0);
+        let v3 = Point3::new(0.0, 0.0, 1.0);
+
+        [
+            v0, v1, v2, v3,
+            Point3::new(0.5, 0.0, 0.0), // 0-1
+            Point3::new(0.5, 0.5, 0.0), // 1-2
+            Point3::new(0.0, 0.5, 0.0), // 2-0
+            Point3::new(0.0, 0.0, 0.5), // 0-3
+            Point3::new(0.5, 0.0, 0.5), // 1-3
+            Point3::new(0.0, 0.5, 0.5), // 2-3
+        ]
+    }
+
     #[test]
     fn test_b_matrix_rigid_translation() {
         // For rigid body translation, B · u_rigid should be zero (no strain)
 
         // Simple reference tetrahedron vertices
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
         // Evaluate at element center
         let barycentric = [0.25, 0.25, 0.25, 0.25];
-        let B = StrainDisplacement::compute_b_at_point(&barycentric, &vertices);
+        let B = StrainDisplacement::compute_b_at_point(&barycentric, &nodes);
 
         // Rigid translation in x-direction: all nodes move by [1, 0, 0]
         let mut u_rigid = SVector::<f64, 30>::zeros();
@@ -192,15 +221,10 @@ mod tests {
     fn test_b_matrix_rank() {
         // B-matrix should have full rank (6) for non-degenerate element
 
-        let vertices = [
-            Point3::new(0.0, 0.0, 0.0),
-            Point3::new(1.0, 0.0, 0.0),
-            Point3::new(0.0, 1.0, 0.0),
-            Point3::new(0.0, 0.0, 1.0),
-        ];
+        let nodes = create_unit_tet10();
 
         let barycentric = [0.25, 0.25, 0.25, 0.25];
-        let B = StrainDisplacement::compute_b_at_point(&barycentric, &vertices);
+        let B = StrainDisplacement::compute_b_at_point(&barycentric, &nodes);
 
         // B should not be all zeros
         let has_nonzero = B.iter().any(|&val| val.abs() > 1e-10);
