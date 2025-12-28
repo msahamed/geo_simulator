@@ -1,0 +1,38 @@
+[package]
+name = "geo_simulator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nalgebra = "0.33"
+rayon = "1.10"
+sprs = "0.11"
+
+[dev-dependencies]
+approx = "0.5"
+
+# Production example
+[[bin]]
+name = "thermal_solver_demo"
+path = "src/bin/thermal_solver_demo.rs"
+
+# Validation benchmarks
+[[bin]]
+name = "thermal_1d_improved_mesh"
+path = "benchmarks/thermal_1d_improved_mesh.rs"
+
+[[bin]]
+name = "mesh_comparison"
+path = "benchmarks/mesh_comparison.rs"
+
+[[bin]]
+name = "mesh_quality"
+path = "benchmarks/mesh_quality.rs"
+
+[[bin]]
+name = "elasticity_halfspace_gravity"
+path = "benchmarks/elasticity_halfspace_gravity.rs"
+
+[[bin]]
+name = "elasticity_patch_test"
+path = "benchmarks/elasticity_patch_test.rs"

@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Output files
+/output/
+*.vtu
+*.vtk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Markdown files (except READMEs)
+*.md
+!README.md
+!**/README.md
