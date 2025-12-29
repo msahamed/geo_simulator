@@ -217,7 +217,11 @@ impl DruckerPrager {
         let mu_plastic = tau_yield / (2.0 * sqrt_j2_edot);
 
         // Apply minimum viscosity cap (prevent unrealistic low values)
-        const MIN_VISCOSITY: f64 = 1e16;  // 10^16 Pa·s (realistic lower bound)
+        // CRITICAL: This controls the viscosity contrast!
+        // With μ_crust ~ 1e23, and FIXED penalty (1e21):
+        //   MIN = 1e18 gives contrast of 1e5 (with fixed penalty, this is OK)
+        //   MIN = 1e20 was too high (no plasticity + ill-conditioned with scaled penalty)
+        const MIN_VISCOSITY: f64 = 1e18;  // 10^18 Pa·s - allows contrast ~1e5
         mu_plastic.max(MIN_VISCOSITY)
     }
 
@@ -340,6 +344,40 @@ impl ElastoViscoPlastic {
         self.viscosity.min(mu_plastic)
     }
 
+    /// Compute effective viscosity with global contrast limiting
+    ///
+    /// **Industry Best Practice** (ASPECT, Underworld2):
+    /// Limit viscosity contrast to prevent solver issues:
+    /// - Max contrast: 1e6 (6 orders of magnitude)
+    /// - Clamp to [μ_min, μ_max] where μ_max/μ_min ≤ 1e6
+    ///
+    /// # Arguments
+    /// * `strain_rate` - Strain rate tensor (6×1 Voigt)
+    /// * `pressure` - Current pressure (compressive positive)
+    /// * `global_mu_min` - Minimum viscosity in entire domain (Pa·s)
+    /// * `global_mu_max` - Maximum viscosity in entire domain (Pa·s)
+    /// * `max_contrast` - Maximum allowed ratio μ_max/μ_min (default 1e6)
+    ///
+    /// # Returns
+    /// Clamped effective viscosity
+    pub fn effective_viscosity_clamped(
+        &self,
+        strain_rate: &SMatrix<f64, 6, 1>,
+        pressure: f64,
+        global_mu_min: f64,
+        global_mu_max: f64,
+        max_contrast: f64,
+    ) -> f64 {
+        let mu_eff = self.effective_viscosity(strain_rate, pressure);
+
+        // Compute allowed range based on contrast limit
+        let adjusted_max = (global_mu_min * max_contrast).min(global_mu_max);
+        let adjusted_min = (global_mu_max / max_contrast).max(global_mu_min);
+
+        // Clamp to range
+        mu_eff.max(adjusted_min).min(adjusted_max)
+    }
+
     /// Check if material is currently yielding
     ///
     /// # Arguments
@@ -349,6 +387,12 @@ impl ElastoViscoPlastic {
     /// true if F ≥ 0 (yielding), false otherwise
     pub fn is_yielding(&self, stress: &SMatrix<f64, 6, 1>) -> bool {
         self.plasticity.yield_function(stress) >= 0.0
+    }
+
+    /// Set softening parameters (convenience wrapper)
+    pub fn with_softening(mut self, cohesion_min: f64, friction_min_deg: f64, strain_ref: f64) -> Self {
+        self.plasticity = self.plasticity.with_softening(cohesion_min, friction_min_deg, strain_ref);
+        self
     }
 }
 
@@ -426,7 +470,7 @@ mod tests {
         
         // With zero strain rate, smoothing ensures viscosity is large but finite
         let mu_p = dp.plastic_viscosity(&edot, pressure);
-        assert!(mu_p >= 1e16); // MIN_VISCOSITY cap
+        assert!(mu_p >= 1e18); // MIN_VISCOSITY cap (updated to 1e18)
     }
 
     #[test]

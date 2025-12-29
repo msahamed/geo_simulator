@@ -270,14 +270,14 @@ impl Tet10Basis {
     /// # Arguments
     /// * `L` - Barycentric coordinates
     /// * `nodal_values` - Values at each of the 10 nodes (can be scalar or vector)
-    pub fn evaluate_at_point<T>(L: &[f64; 4], nodal_values: &[T; 10]) -> T
+    pub fn evaluate_at_point<T>(l: &[f64; 4], nodal_values: &[T; 10]) -> T
     where
         T: Default + std::ops::Mul<f64, Output = T> + std::ops::Add<T, Output = T> + Copy,
     {
-        let N = Self::shape_functions(L);
-        let mut result = nodal_values[0] * N[0];
+        let n = Self::shape_functions(l);
+        let mut result = nodal_values[0] * n[0];
         for i in 1..10 {
-            result = result + nodal_values[i] * N[i];
+            result = result + nodal_values[i] * n[i];
         }
         result
     }
@@ -296,13 +296,13 @@ impl Tet10Basis {
         nodes: &[Point3<f64>; 10],
         guess: [f64; 4],
     ) -> [f64; 4] {
-        let mut L = guess;
+        let mut l = guess;
         let p_target = point.coords;
 
         // Simple Newton iteration
         for _ in 0..5 {
-            // F(L) = X(L) - P
-            let n = Self::shape_functions(&L);
+            // F(l) = X(l) - P
+            let n = Self::shape_functions(&l);
             let mut x_l = Vector3::zeros();
             for i in 0..10 {
                 x_l += nodes[i].coords * n[i];
@@ -314,21 +314,21 @@ impl Tet10Basis {
             }
 
             // Jacobian J = ∂X/∂L
-            let J = Self::jacobian(&L, nodes);
+            let j = Self::jacobian(&l, nodes);
             
             // Note: Since L0+L1+L2+L3=1, we only vary L1, L2, L3
             // Res = J * dL
-            if let Some(J_inv) = J.try_inverse() {
-                let dL = J_inv * res;
-                L[1] -= dL[0];
-                L[2] -= dL[1];
-                L[3] -= dL[2];
-                L[0] = 1.0 - L[1] - L[2] - L[3];
+            if let Some(j_inv) = j.try_inverse() {
+                let d_l = j_inv * res;
+                l[1] -= d_l[0];
+                l[2] -= d_l[1];
+                l[3] -= d_l[2];
+                l[0] = 1.0 - l[1] - l[2] - l[3];
             } else {
                 break;
             }
         }
-        L
+        l
     }
 
     /// Compute element volume

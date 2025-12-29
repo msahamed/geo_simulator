@@ -68,6 +68,20 @@ impl Solver for DirectSolver {
         (x, stats)
     }
 
+    #[allow(non_snake_case)]
+    fn solve_with_operator<O, P>(
+        &self,
+        _A: &O,
+        _b: &[f64],
+        _precond: &P,
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: super::solver::LinearOperator,
+        P: super::preconditioner::Preconditioner,
+    {
+        panic!("DirectSolver does not support matrix-free operator. Use iterative solvers instead.");
+    }
+
     fn name(&self) -> &str {
         &self.name
     }

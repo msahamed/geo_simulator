@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use super::geometry::Mesh;
+use super::tracers::TracerSwarm;
 
 /// VTK file writer for unstructured grids
 pub struct VtkWriter;
@@ -62,6 +63,32 @@ impl VtkWriter {
             // Write vector fields
             for field_name in mesh.field_data.vector_field_names() {
                 if let Some(field) = mesh.field_data.get_vector_field(field_name) {
+                    writeln!(file, "VECTORS {} double", field.name)?;
+                    for vec in &field.data {
+                        writeln!(file, "{} {} {}", vec.x, vec.y, vec.z)?;
+                    }
+                }
+            }
+        }
+
+        // Cell data (scalar and vector fields)
+        if !mesh.cell_data.is_empty() {
+            writeln!(file, "\nCELL_DATA {}", mesh.num_elements())?;
+
+            // Write scalar fields
+            for field_name in mesh.cell_data.field_names() {
+                if let Some(field) = mesh.cell_data.get_field(field_name) {
+                    writeln!(file, "SCALARS {} double 1", field.name)?;
+                    writeln!(file, "LOOKUP_TABLE default")?;
+                    for &value in &field.data {
+                        writeln!(file, "{}", value)?;
+                    }
+                }
+            }
+
+            // Write vector fields
+            for field_name in mesh.cell_data.vector_field_names() {
+                if let Some(field) = mesh.cell_data.get_vector_field(field_name) {
                     writeln!(file, "VECTORS {} double", field.name)?;
                     for vec in &field.data {
                         writeln!(file, "{} {} {}", vec.x, vec.y, vec.z)?;
@@ -187,7 +214,314 @@ impl VtkWriter {
             writeln!(file, "      </PointData>")?;
         }
 
+        // Cell data (scalar and vector fields)
+        if !mesh.cell_data.is_empty() {
+            writeln!(file, "      <CellData>")?;
+
+            // Write scalar fields
+            for field_name in mesh.cell_data.field_names() {
+                if let Some(field) = mesh.cell_data.get_field(field_name) {
+                    writeln!(
+                        file,
+                        "        <DataArray type=\"Float64\" Name=\"{}\" format=\"ascii\">",
+                        field.name
+                    )?;
+                    write!(file, "          ")?;
+                    for &value in &field.data {
+                        write!(file, "{} ", value)?;
+                    }
+                    writeln!(file)?;
+                    writeln!(file, "        </DataArray>")?;
+                }
+            }
+
+            // Write vector fields
+            for field_name in mesh.cell_data.vector_field_names() {
+                if let Some(field) = mesh.cell_data.get_vector_field(field_name) {
+                    writeln!(
+                        file,
+                        "        <DataArray type=\"Float64\" Name=\"{}\" NumberOfComponents=\"3\" format=\"ascii\">",
+                        field.name
+                    )?;
+                    write!(file, "          ")?;
+                    for vec in &field.data {
+                        write!(file, "{} {} {} ", vec.x, vec.y, vec.z)?;
+                    }
+                    writeln!(file)?;
+                    writeln!(file, "        </DataArray>")?;
+                }
+            }
+
+            writeln!(file, "      </CellData>")?;
+        }
+
         writeln!(file, "    </Piece>")?;
+        writeln!(file, "  </UnstructuredGrid>")?;
+        writeln!(file, "</VTKFile>")?;
+
+        Ok(())
+    }
+
+    /// Write tracers to VTU format (as a cloud of points)
+    pub fn write_tracers_vtu(tracers: &TracerSwarm, filename: &str) -> io::Result<()> {
+        let mut file = File::create(filename)?;
+        let num_points = tracers.num_tracers();
+
+        // XML header
+        writeln!(file, "<?xml version=\"1.0\"?>")?;
+        writeln!(
+            file,
+            "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\">"
+        )?;
+        writeln!(file, "  <UnstructuredGrid>")?;
+        writeln!(
+            file,
+            "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">",
+            num_points,
+            num_points // Each point is its own cell (VTK_VERTEX)
+        )?;
+
+        // Points
+        writeln!(file, "      <Points>")?;
+        writeln!(
+            file,
+            "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">"
+        )?;
+        for i in 0..num_points {
+            writeln!(file, "          {} {} {}", tracers.x[i], tracers.y[i], tracers.z[i])?;
+        }
+        writeln!(file, "        </DataArray>")?;
+        writeln!(file, "      </Points>")?;
+
+        // Cells (Vertices)
+        writeln!(file, "      <Cells>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 0..num_points {
+            write!(file, "{} ", i)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 1..=num_points {
+            write!(file, "{} ", i)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for _ in 0..num_points {
+            write!(file, "1 ")?; // 1 = VTK_VERTEX
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "      </Cells>")?;
+
+        // Point Data
+        writeln!(file, "      <PointData>")?;
+        
+        // Material ID
+        writeln!(file, "        <DataArray type=\"UInt32\" Name=\"MaterialID\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &id in &tracers.material_id {
+            write!(file, "{} ", id)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        // Velocity (Vector)
+        if !tracers.vx.is_empty() {
+            writeln!(file, "        <DataArray type=\"Float64\" Name=\"Velocity\" NumberOfComponents=\"3\" format=\"ascii\">")?;
+            for i in 0..num_points {
+                writeln!(file, "          {} {} {}", tracers.vx[i], tracers.vy[i], tracers.vz[i])?;
+            }
+            writeln!(file, "        </DataArray>")?;
+        }
+
+        // Plastic Strain
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticStrain\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &eps in &tracers.plastic_strain {
+            write!(file, "{} ", eps)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "      </PointData>")?;
+
+        writeln!(file, "    </Piece>")?;
+        writeln!(file, "  </UnstructuredGrid>")?;
+        writeln!(file, "</VTKFile>")?;
+
+        Ok(())
+    }
+
+    /// Write both mesh and tracers into a single VTU file using multiple pieces
+    pub fn write_combined_vtu(mesh: &Mesh, tracers: &TracerSwarm, filename: &str) -> io::Result<()> {
+        let mut file = File::create(filename)?;
+
+        // XML header
+        writeln!(file, "<?xml version=\"1.0\"?>")?;
+        writeln!(
+            file,
+            "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\">"
+        )?;
+        writeln!(file, "  <UnstructuredGrid>")?;
+
+        // --------------------------------------------------------------------
+        // Piece 1: The Mesh (Elements)
+        // --------------------------------------------------------------------
+        writeln!(
+            file,
+            "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">",
+            mesh.num_nodes(),
+            mesh.num_elements()
+        )?;
+
+        // Points
+        writeln!(file, "      <Points>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">")?;
+        for node in &mesh.geometry.nodes {
+            writeln!(file, "          {} {} {}", node.x, node.y, node.z)?;
+        }
+        writeln!(file, "        </DataArray>")?;
+        writeln!(file, "      </Points>")?;
+
+        // Cells
+        writeln!(file, "      <Cells>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for elem in &mesh.connectivity.tet10_elements {
+            for &node_idx in &elem.nodes {
+                write!(file, "{} ", node_idx)?;
+            }
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 1..=mesh.num_elements() {
+            write!(file, "{} ", i * 10)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for _ in 0..mesh.num_elements() {
+            write!(file, "24 ")?; // VTK_QUADRATIC_TETRA
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "      </Cells>")?;
+
+        // Mesh Point Data
+        if !mesh.field_data.is_empty() {
+            writeln!(file, "      <PointData>")?;
+            for field_name in mesh.field_data.field_names() {
+                if let Some(field) = mesh.field_data.get_field(field_name) {
+                    writeln!(file, "        <DataArray type=\"Float64\" Name=\"{}\" format=\"ascii\">", field.name)?;
+                    write!(file, "          ")?;
+                    for &value in &field.data { let _ = write!(file, "{} ", value); }
+                    writeln!(file, "\n        </DataArray>")?;
+                }
+            }
+            for field_name in mesh.field_data.vector_field_names() {
+                if let Some(field) = mesh.field_data.get_vector_field(field_name) {
+                    writeln!(file, "        <DataArray type=\"Float64\" Name=\"{}\" NumberOfComponents=\"3\" format=\"ascii\">", field.name)?;
+                    for vec in &field.data {
+                        writeln!(file, "          {} {} {}", vec.x, vec.y, vec.z)?;
+                    }
+                    writeln!(file, "        </DataArray>")?;
+                }
+            }
+            writeln!(file, "      </PointData>")?;
+        }
+
+        // Mesh Cell Data
+        if !mesh.cell_data.is_empty() {
+            writeln!(file, "      <CellData>")?;
+            for field_name in mesh.cell_data.field_names() {
+                if let Some(field) = mesh.cell_data.get_field(field_name) {
+                    writeln!(file, "        <DataArray type=\"Float64\" Name=\"{}\" format=\"ascii\">", field.name)?;
+                    write!(file, "          ")?;
+                    for &value in &field.data { let _ = write!(file, "{} ", value); }
+                    writeln!(file, "\n        </DataArray>")?;
+                }
+            }
+            writeln!(file, "      </CellData>")?;
+        }
+        writeln!(file, "    </Piece>")?;
+
+        // --------------------------------------------------------------------
+        // Piece 2: The Tracers (Points)
+        // --------------------------------------------------------------------
+        let num_tracers = tracers.num_tracers();
+        writeln!(
+            file,
+            "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">",
+            num_tracers,
+            num_tracers
+        )?;
+
+        // Points
+        writeln!(file, "      <Points>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">")?;
+        for i in 0..num_tracers {
+            writeln!(file, "          {} {} {}", tracers.x[i], tracers.y[i], tracers.z[i])?;
+        }
+        writeln!(file, "        </DataArray>")?;
+        writeln!(file, "      </Points>")?;
+
+        // Cells
+        writeln!(file, "      <Cells>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 0..num_tracers { write!(file, "{} ", i)?; }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 1..=num_tracers { write!(file, "{} ", i)?; }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for _ in 0..num_tracers { write!(file, "1 ")?; } // VTK_VERTEX
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "      </Cells>")?;
+
+        // Tracer Data
+        writeln!(file, "      <PointData>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"MaterialID\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &id in &tracers.material_id { write!(file, "{} ", id)?; }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticStrain\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &eps in &tracers.plastic_strain { write!(file, "{} ", eps)?; }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Stress_II\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &val in &tracers.stress_ii { write!(file, "{} ", val)?; }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"StrainRate_II\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &val in &tracers.strain_rate_ii { write!(file, "{} ", val)?; }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Viscosity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &val in &tracers.viscosity { write!(file, "{} ", val)?; }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Pressure\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &val in &tracers.pressure { write!(file, "{} ", val)?; }
+        writeln!(file, "\n        </DataArray>")?;
+
+        if !tracers.vx.is_empty() {
+            writeln!(file, "        <DataArray type=\"Float64\" Name=\"Velocity\" NumberOfComponents=\"3\" format=\"ascii\">")?;
+            for i in 0..num_tracers {
+                writeln!(file, "          {} {} {}", tracers.vx[i], tracers.vy[i], tracers.vz[i])?;
+            }
+            writeln!(file, "        </DataArray>")?;
+        }
+        writeln!(file, "      </PointData>")?;
+
+        writeln!(file, "    </Piece>")?;
+
         writeln!(file, "  </UnstructuredGrid>")?;
         writeln!(file, "</VTKFile>")?;
 

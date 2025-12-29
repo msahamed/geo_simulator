@@ -42,6 +42,7 @@ pub struct Mesh {
     pub geometry: Geometry,
     pub connectivity: Connectivity,
     pub field_data: FieldData,
+    pub cell_data: FieldData,
     /// Stress history for viscoelastic simulations
     pub stress_history: Option<StressHistory>,
     /// Plasticity state for strain softening
@@ -54,6 +55,7 @@ impl Mesh {
             geometry: Geometry::new(),
             connectivity: Connectivity::new(),
             field_data: FieldData::new(),
+            cell_data: FieldData::new(),
             stress_history: None,
             plasticity_state: None,
         }

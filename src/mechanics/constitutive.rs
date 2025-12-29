@@ -61,11 +61,11 @@ impl IsotropicElasticity {
     /// 6×6 symmetric positive-definite constitutive matrix
     #[allow(non_snake_case)]
     pub fn constitutive_matrix(&self) -> SMatrix<f64, 6, 6> {
-        let E = self.youngs_modulus;
+        let e_val = self.youngs_modulus;
         let nu = self.poisson_ratio;
 
         // Compute scaling factor
-        let factor = E / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        let factor = e_val / ((1.0 + nu) * (1.0 - 2.0 * nu));
 
         // Diagonal terms (normal stresses)
         let diag = 1.0 - nu;
@@ -77,28 +77,28 @@ impl IsotropicElasticity {
         let shear = (1.0 - 2.0 * nu) / 2.0;
 
         // Build D matrix
-        let mut D = SMatrix::<f64, 6, 6>::zeros();
+        let mut d_mat = SMatrix::<f64, 6, 6>::zeros();
 
         // Normal stress block (3×3 upper left)
-        D[(0, 0)] = diag;
-        D[(0, 1)] = off_diag;
-        D[(0, 2)] = off_diag;
+        d_mat[(0, 0)] = diag;
+        d_mat[(0, 1)] = off_diag;
+        d_mat[(0, 2)] = off_diag;
 
-        D[(1, 0)] = off_diag;
-        D[(1, 1)] = diag;
-        D[(1, 2)] = off_diag;
+        d_mat[(1, 0)] = off_diag;
+        d_mat[(1, 1)] = diag;
+        d_mat[(1, 2)] = off_diag;
 
-        D[(2, 0)] = off_diag;
-        D[(2, 1)] = off_diag;
-        D[(2, 2)] = diag;
+        d_mat[(2, 0)] = off_diag;
+        d_mat[(2, 1)] = off_diag;
+        d_mat[(2, 2)] = diag;
 
         // Shear stress block (3×3 lower right diagonal)
-        D[(3, 3)] = shear;
-        D[(4, 4)] = shear;
-        D[(5, 5)] = shear;
+        d_mat[(3, 3)] = shear;
+        d_mat[(4, 4)] = shear;
+        d_mat[(5, 5)] = shear;
 
         // Scale by factor
-        D * factor
+        d_mat * factor
     }
 
     /// Compute Lamé parameters (λ, μ)
@@ -235,22 +235,22 @@ impl NewtonianViscosity {
         let factor_2mu = 2.0 * mu;
         let lambda_v = zeta - (2.0 * mu / 3.0);
 
-        let mut D = SMatrix::<f64, 6, 6>::zeros();
+        let mut d_mat = SMatrix::<f64, 6, 6>::zeros();
 
         // Normal stress block
         for i in 0..3 {
             for j in 0..3 {
-                D[(i, j)] = lambda_v;
+                d_mat[(i, j)] = lambda_v;
             }
-            D[(i, i)] += factor_2mu;
+            d_mat[(i, i)] += factor_2mu;
         }
 
         // Shear stress block
-        D[(3, 3)] = factor_2mu;
-        D[(4, 4)] = factor_2mu;
-        D[(5, 5)] = factor_2mu;
+        d_mat[(3, 3)] = factor_2mu;
+        d_mat[(4, 4)] = factor_2mu;
+        d_mat[(5, 5)] = factor_2mu;
 
-        D
+        d_mat
     }
 
     /// Returns the dynamic viscosity μ

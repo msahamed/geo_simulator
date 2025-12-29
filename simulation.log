@@ -1,0 +1,208 @@
+   Compiling geo_simulator v0.1.0 (/Users/sabberahamed/Documents/Research/geo_simulator)
+warning: unused import: `BiCGSTAB`
+  --> benchmarks/core_complex.rs:12:51
+   |
+12 |     ImprovedMeshGenerator, DofManager, Assembler, BiCGSTAB, ConjugateGradient, VectorField,
+   |                                                   ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `n_dofs`
+   --> benchmarks/core_complex.rs:182:13
+    |
+182 |         let n_dofs = dof_mgr.total_dofs();
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_n_dofs`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `geo_simulator` (bin "core_complex") generated 2 warnings (run `cargo fix --bin "core_complex" -p geo_simulator` to apply 2 suggestions)
+    Finished `release` profile [optimized] target(s) in 1.84s
+     Running `target/release/core_complex`
+═══════════════════════════════════════════════════════════════
+  Geodynamic Benchmark: 3D Core Complex Formation
+═══════════════════════════════════════════════════════════════
+
+Problem Dimensions:
+  Crust: 20 km | Mantle: 10 km
+  Extension Rate: 1 cm/yr
+  Time scale: 5000 years/step
+  Total Duration: 5 Million Years
+
+Generating Mesh and Tracers...
+  Mesh: 3072 elements | Tracers: 3000
+
+Starting Tectonic Evolution...
+    JFNK: Initial filtered residual = 1.954e16
+    JFNK: BC scaling (char_diag) = 2.982e26
+    JFNK: Linear solver failed at Newton iter 0
+  Step 0: WARNING - JFNK did not converge! Iters: 1, Residual: 1.954e16
+    Last linear solve: converged=false, iterations=10000, residual=4.577e17
+Step    0 | 0.00 MY | Newton:  1 | Lin: 10000 | ||R||: 1.95e16
+  Step 1: WARNING - JFNK did not converge! Iters: 1, Residual: 1.906e16
+    Last linear solve: converged=false, iterations=10000, residual=5.914e17
+Step    1 | 0.01 MY | Newton:  1 | Lin: 10000 | ||R||: 1.91e16
+  Step 2: WARNING - JFNK did not converge! Iters: 1, Residual: 1.882e16
+    Last linear solve: converged=false, iterations=10000, residual=5.643e17
+Step    2 | 0.01 MY | Newton:  1 | Lin: 10000 | ||R||: 1.88e16
+  Step 3: WARNING - JFNK did not converge! Iters: 1, Residual: 1.808e16
+    Last linear solve: converged=false, iterations=10000, residual=5.461e17
+Step    3 | 0.01 MY | Newton:  1 | Lin: 10000 | ||R||: 1.81e16
+  Step 4: WARNING - JFNK did not converge! Iters: 1, Residual: 1.825e16
+    Last linear solve: converged=false, iterations=10000, residual=5.676e17
+Step    4 | 0.02 MY | Newton:  1 | Lin: 10000 | ||R||: 1.82e16
+  Step 5: WARNING - JFNK did not converge! Iters: 1, Residual: 1.825e16
+    Last linear solve: converged=false, iterations=10000, residual=6.123e17
+Step    5 | 0.03 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 6: WARNING - JFNK did not converge! Iters: 1, Residual: 1.811e16
+    Last linear solve: converged=false, iterations=10000, residual=5.666e17
+Step    6 | 0.03 MY | Newton:  1 | Lin: 10000 | ||R||: 1.81e16
+  Step 7: WARNING - JFNK did not converge! Iters: 1, Residual: 1.808e16
+    Last linear solve: converged=false, iterations=10000, residual=5.670e17
+Step    7 | 0.04 MY | Newton:  1 | Lin: 10000 | ||R||: 1.81e16
+  Step 8: WARNING - JFNK did not converge! Iters: 1, Residual: 1.828e16
+    Last linear solve: converged=false, iterations=10000, residual=6.069e17
+Step    8 | 0.04 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 9: WARNING - JFNK did not converge! Iters: 1, Residual: 1.822e16
+    Last linear solve: converged=false, iterations=10000, residual=5.516e17
+Step    9 | 0.04 MY | Newton:  1 | Lin: 10000 | ||R||: 1.82e16
+  Step 10: WARNING - JFNK did not converge! Iters: 1, Residual: 1.830e16
+    Last linear solve: converged=false, iterations=10000, residual=5.668e17
+Step   10 | 0.05 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 11: WARNING - JFNK did not converge! Iters: 1, Residual: 1.832e16
+    Last linear solve: converged=false, iterations=10000, residual=5.298e17
+Step   11 | 0.06 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 12: WARNING - JFNK did not converge! Iters: 1, Residual: 1.834e16
+    Last linear solve: converged=false, iterations=10000, residual=5.489e17
+Step   12 | 0.06 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 13: WARNING - JFNK did not converge! Iters: 1, Residual: 1.820e16
+    Last linear solve: converged=false, iterations=10000, residual=5.528e17
+Step   13 | 0.07 MY | Newton:  1 | Lin: 10000 | ||R||: 1.82e16
+  Step 14: WARNING - JFNK did not converge! Iters: 1, Residual: 1.818e16
+    Last linear solve: converged=false, iterations=10000, residual=5.776e17
+Step   14 | 0.07 MY | Newton:  1 | Lin: 10000 | ||R||: 1.82e16
+  Step 15: WARNING - JFNK did not converge! Iters: 1, Residual: 1.840e16
+    Last linear solve: converged=false, iterations=10000, residual=5.877e17
+Step   15 | 0.07 MY | Newton:  1 | Lin: 10000 | ||R||: 1.84e16
+  Step 16: WARNING - JFNK did not converge! Iters: 1, Residual: 1.826e16
+    Last linear solve: converged=false, iterations=10000, residual=5.479e17
+Step   16 | 0.08 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 17: WARNING - JFNK did not converge! Iters: 1, Residual: 1.845e16
+    Last linear solve: converged=false, iterations=10000, residual=5.425e17
+Step   17 | 0.09 MY | Newton:  1 | Lin: 10000 | ||R||: 1.84e16
+  Step 18: WARNING - JFNK did not converge! Iters: 1, Residual: 1.832e16
+    Last linear solve: converged=false, iterations=10000, residual=5.237e17
+Step   18 | 0.09 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 19: WARNING - JFNK did not converge! Iters: 1, Residual: 1.831e16
+    Last linear solve: converged=false, iterations=10000, residual=5.327e17
+Step   19 | 0.10 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+    JFNK: Initial filtered residual = 1.834e16
+    JFNK: BC scaling (char_diag) = 2.731e26
+    JFNK: Linear solver failed at Newton iter 0
+  Step 20: WARNING - JFNK did not converge! Iters: 1, Residual: 1.834e16
+    Last linear solve: converged=false, iterations=10000, residual=5.017e17
+Step   20 | 0.10 MY | Newton:  1 | Lin: 10000 | ||R||: 1.83e16
+  Step 21: WARNING - JFNK did not converge! Iters: 1, Residual: 1.837e16
+    Last linear solve: converged=false, iterations=10000, residual=5.079e17
+Step   21 | 0.10 MY | Newton:  1 | Lin: 10000 | ||R||: 1.84e16
+  Step 22: WARNING - JFNK did not converge! Iters: 1, Residual: 1.841e16
+    Last linear solve: converged=false, iterations=10000, residual=4.789e17
+Step   22 | 0.11 MY | Newton:  1 | Lin: 10000 | ||R||: 1.84e16
+  Step 23: WARNING - JFNK did not converge! Iters: 1, Residual: 1.844e16
+    Last linear solve: converged=false, iterations=10000, residual=5.004e17
+Step   23 | 0.12 MY | Newton:  1 | Lin: 10000 | ||R||: 1.84e16
+  Step 24: WARNING - JFNK did not converge! Iters: 1, Residual: 1.867e16
+    Last linear solve: converged=false, iterations=10000, residual=4.871e17
+Step   24 | 0.12 MY | Newton:  1 | Lin: 10000 | ||R||: 1.87e16
+  Step 25: WARNING - JFNK did not converge! Iters: 1, Residual: 1.871e16
+    Last linear solve: converged=false, iterations=10000, residual=5.049e17
+Step   25 | 0.12 MY | Newton:  1 | Lin: 10000 | ||R||: 1.87e16
+  Step 26: WARNING - JFNK did not converge! Iters: 1, Residual: 1.875e16
+    Last linear solve: converged=false, iterations=10000, residual=4.869e17
+Step   26 | 0.13 MY | Newton:  1 | Lin: 10000 | ||R||: 1.87e16
+  Step 27: WARNING - JFNK did not converge! Iters: 1, Residual: 1.879e16
+    Last linear solve: converged=false, iterations=10000, residual=4.846e17
+Step   27 | 0.14 MY | Newton:  1 | Lin: 10000 | ||R||: 1.88e16
+  Step 28: WARNING - JFNK did not converge! Iters: 1, Residual: 1.867e16
+    Last linear solve: converged=false, iterations=10000, residual=5.266e17
+Step   28 | 0.14 MY | Newton:  1 | Lin: 10000 | ||R||: 1.87e16
+  Step 29: WARNING - JFNK did not converge! Iters: 1, Residual: 1.888e16
+    Last linear solve: converged=false, iterations=10000, residual=4.579e17
+Step   29 | 0.14 MY | Newton:  1 | Lin: 10000 | ||R||: 1.89e16
+  Step 30: WARNING - JFNK did not converge! Iters: 1, Residual: 1.892e16
+    Last linear solve: converged=false, iterations=10000, residual=4.726e17
+Step   30 | 0.15 MY | Newton:  1 | Lin: 10000 | ||R||: 1.89e16
+  Step 31: WARNING - JFNK did not converge! Iters: 1, Residual: 1.897e16
+    Last linear solve: converged=false, iterations=10000, residual=4.541e17
+Step   31 | 0.15 MY | Newton:  1 | Lin: 10000 | ||R||: 1.90e16
+  Step 32: WARNING - JFNK did not converge! Iters: 1, Residual: 1.886e16
+    Last linear solve: converged=false, iterations=10000, residual=4.703e17
+Step   32 | 0.16 MY | Newton:  1 | Lin: 10000 | ||R||: 1.89e16
+  Step 33: WARNING - JFNK did not converge! Iters: 1, Residual: 1.907e16
+    Last linear solve: converged=false, iterations=10000, residual=4.469e17
+Step   33 | 0.17 MY | Newton:  1 | Lin: 10000 | ||R||: 1.91e16
+  Step 34: WARNING - JFNK did not converge! Iters: 1, Residual: 1.912e16
+    Last linear solve: converged=false, iterations=10000, residual=4.542e17
+Step   34 | 0.17 MY | Newton:  1 | Lin: 10000 | ||R||: 1.91e16
+  Step 35: WARNING - JFNK did not converge! Iters: 1, Residual: 1.901e16
+    Last linear solve: converged=false, iterations=10000, residual=4.605e17
+Step   35 | 0.17 MY | Newton:  1 | Lin: 10000 | ||R||: 1.90e16
+  Step 36: WARNING - JFNK did not converge! Iters: 1, Residual: 1.923e16
+    Last linear solve: converged=false, iterations=10000, residual=4.373e17
+Step   36 | 0.18 MY | Newton:  1 | Lin: 10000 | ||R||: 1.92e16
+  Step 37: WARNING - JFNK did not converge! Iters: 1, Residual: 1.912e16
+    Last linear solve: converged=false, iterations=10000, residual=4.572e17
+Step   37 | 0.18 MY | Newton:  1 | Lin: 10000 | ||R||: 1.91e16
+  Step 38: WARNING - JFNK did not converge! Iters: 1, Residual: 1.916e16
+    Last linear solve: converged=false, iterations=10000, residual=4.675e17
+Step   38 | 0.19 MY | Newton:  1 | Lin: 10000 | ||R||: 1.92e16
+  Step 39: WARNING - JFNK did not converge! Iters: 1, Residual: 1.922e16
+    Last linear solve: converged=false, iterations=10000, residual=4.599e17
+Step   39 | 0.20 MY | Newton:  1 | Lin: 10000 | ||R||: 1.92e16
+    JFNK: Initial filtered residual = 1.928e16
+    JFNK: BC scaling (char_diag) = 2.889e26
+    JFNK: Linear solver failed at Newton iter 0
+  Step 40: WARNING - JFNK did not converge! Iters: 1, Residual: 1.928e16
+    Last linear solve: converged=false, iterations=10000, residual=4.669e17
+Step   40 | 0.20 MY | Newton:  1 | Lin: 10000 | ||R||: 1.93e16
+  Step 41: WARNING - JFNK did not converge! Iters: 1, Residual: 1.952e16
+    Last linear solve: converged=false, iterations=10000, residual=4.174e17
+Step   41 | 0.20 MY | Newton:  1 | Lin: 10000 | ||R||: 1.95e16
+  Step 42: WARNING - JFNK did not converge! Iters: 1, Residual: 1.959e16
+    Last linear solve: converged=false, iterations=10000, residual=4.251e17
+Step   42 | 0.21 MY | Newton:  1 | Lin: 10000 | ||R||: 1.96e16
+  Step 43: WARNING - JFNK did not converge! Iters: 1, Residual: 1.949e16
+    Last linear solve: converged=false, iterations=10000, residual=4.394e17
+Step   43 | 0.21 MY | Newton:  1 | Lin: 10000 | ||R||: 1.95e16
+  Step 44: WARNING - JFNK did not converge! Iters: 1, Residual: 1.972e16
+    Last linear solve: converged=false, iterations=10000, residual=4.160e17
+Step   44 | 0.22 MY | Newton:  1 | Lin: 10000 | ||R||: 1.97e16
+  Step 45: WARNING - JFNK did not converge! Iters: 1, Residual: 1.962e16
+    Last linear solve: converged=false, iterations=10000, residual=4.498e17
+Step   45 | 0.23 MY | Newton:  1 | Lin: 10000 | ||R||: 1.96e16
+  Step 46: WARNING - JFNK did not converge! Iters: 1, Residual: 1.967e16
+    Last linear solve: converged=false, iterations=10000, residual=4.087e17
+Step   46 | 0.23 MY | Newton:  1 | Lin: 10000 | ||R||: 1.97e16
+  Step 47: WARNING - JFNK did not converge! Iters: 1, Residual: 1.974e16
+    Last linear solve: converged=false, iterations=10000, residual=4.147e17
+Step   47 | 0.23 MY | Newton:  1 | Lin: 10000 | ||R||: 1.97e16
+  Step 48: WARNING - JFNK did not converge! Iters: 1, Residual: 1.998e16
+    Last linear solve: converged=false, iterations=10000, residual=4.269e17
+Step   48 | 0.24 MY | Newton:  1 | Lin: 10000 | ||R||: 2.00e16
+  Step 49: WARNING - JFNK did not converge! Iters: 1, Residual: 1.989e16
+    Last linear solve: converged=false, iterations=10000, residual=4.211e17
+Step   49 | 0.24 MY | Newton:  1 | Lin: 10000 | ||R||: 1.99e16
+  Step 50: WARNING - JFNK did not converge! Iters: 1, Residual: 1.996e16
+    Last linear solve: converged=false, iterations=10000, residual=4.257e17
+Step   50 | 0.25 MY | Newton:  1 | Lin: 10000 | ||R||: 2.00e16
+  Step 51: WARNING - JFNK did not converge! Iters: 1, Residual: 2.003e16
+    Last linear solve: converged=false, iterations=10000, residual=4.278e17
+Step   51 | 0.26 MY | Newton:  1 | Lin: 10000 | ||R||: 2.00e16
+  Step 52: WARNING - JFNK did not converge! Iters: 1, Residual: 2.010e16
+    Last linear solve: converged=false, iterations=10000, residual=4.134e17
+Step   52 | 0.26 MY | Newton:  1 | Lin: 10000 | ||R||: 2.01e16
+  Step 53: WARNING - JFNK did not converge! Iters: 1, Residual: 2.018e16
+    Last linear solve: converged=false, iterations=10000, residual=3.947e17
+Step   53 | 0.27 MY | Newton:  1 | Lin: 10000 | ||R||: 2.02e16
+  Step 54: WARNING - JFNK did not converge! Iters: 1, Residual: 2.042e16
+    Last linear solve: converged=false, iterations=10000, residual=4.113e17
+Step   54 | 0.27 MY | Newton:  1 | Lin: 10000 | ||R||: 2.04e16

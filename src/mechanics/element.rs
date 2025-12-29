@@ -34,10 +34,10 @@ impl ElasticityElement {
         nodes: &[Point3<f64>; 10],
         material: &IsotropicElasticity,
     ) -> SMatrix<f64, 30, 30> {
-        let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
+        let mut k_elem = SMatrix::<f64, 30, 30>::zeros();
 
         // Get constitutive matrix (constant for linear isotropic elasticity)
-        let D = material.constitutive_matrix();
+        let d = material.constitutive_matrix();
 
         // Use 4-point Gauss quadrature (degree 2, sufficient for linear strain)
         let quad = GaussQuadrature::tet_4point();
@@ -45,23 +45,23 @@ impl ElasticityElement {
         // Numerical integration over element volume
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
             // Compute Jacobian and B matrix at this quadrature point
-            let J = Tet10Basis::jacobian(qp, nodes);
-            let det_J = J.determinant();
-            let B = StrainDisplacement::compute_b_at_point(qp, nodes);
+            let j = Tet10Basis::jacobian(qp, nodes);
+            let det_j = j.determinant();
+            let b = StrainDisplacement::compute_b_at_point(qp, nodes);
 
             // Integration weight (includes volume element transformation)
-            let w = weight * det_J.abs();
+            let w = weight * det_j.abs();
 
             // Compute B^T D B contribution
             // Strategy: First compute DB = D * B (6×30), then B^T * (DB)
-            let DB = D * B;
-            let BT_DB = B.transpose() * DB;
+            let db = d * b;
+            let bt_db = b.transpose() * db;
 
             // Accumulate weighted contribution
-            K_elem += w * BT_DB;
+            k_elem += w * bt_db;
         }
 
-        K_elem
+        k_elem
     }
 
     /// Compute element viscosity matrix for viscous flow
@@ -88,10 +88,10 @@ impl ElasticityElement {
         nodes: &[Point3<f64>; 10],
         material: &NewtonianViscosity,
     ) -> SMatrix<f64, 30, 30> {
-        let mut K_elem = SMatrix::<f64, 30, 30>::zeros();
+        let mut k_elem = SMatrix::<f64, 30, 30>::zeros();
 
         // Get viscous constitutive matrix (relates ε̇ to τ)
-        let D = material.constitutive_matrix();
+        let d = material.constitutive_matrix();
 
         // 4-point Gauss quadrature (degree 2, sufficient for linear strain-rate)
         let quad = GaussQuadrature::tet_4point();
@@ -99,22 +99,22 @@ impl ElasticityElement {
         // Numerical integration: K_e = ∫ B^T D B dV
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
             // Compute Jacobian and B matrix at this quadrature point
-            let J = Tet10Basis::jacobian(qp, nodes);
-            let det_J = J.determinant();
-            let B = StrainDisplacement::compute_b_at_point(qp, nodes);
+            let j = Tet10Basis::jacobian(qp, nodes);
+            let det_j = j.determinant();
+            let b = StrainDisplacement::compute_b_at_point(qp, nodes);
 
             // Integration weight includes Jacobian determinant
-            let w = weight * det_J.abs();
+            let w = weight * det_j.abs();
 
             // Compute B^T D B
-            let DB = D * B;
-            let BT_DB = B.transpose() * DB;
+            let db = d * b;
+            let bt_db = b.transpose() * db;
 
             // Accumulate weighted contribution
-            K_elem += w * BT_DB;
+            k_elem += w * bt_db;
         }
 
-        K_elem
+        k_elem
     }
 
     /// Compute element mass matrix for dynamics (placeholder)
@@ -134,26 +134,26 @@ impl ElasticityElement {
         nodes: &[Point3<f64>; 10],
         density: f64,
     ) -> SMatrix<f64, 30, 30> {
-        let mut M_elem = SMatrix::<f64, 30, 30>::zeros();
+        let mut m_elem = SMatrix::<f64, 30, 30>::zeros();
         let quad = GaussQuadrature::tet_4point();
 
         for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
-            let J = Tet10Basis::jacobian(qp, nodes);
-            let det_J = J.determinant().abs();
-            let N = Tet10Basis::shape_functions(qp);
+            let j = Tet10Basis::jacobian(qp, nodes);
+            let det_j = j.determinant().abs();
+            let n = Tet10Basis::shape_functions(qp);
             
-            let w = weight * det_J * density;
+            let w = weight * det_j * density;
 
             for i in 0..10 {
                 for j in 0..10 {
-                    let val = w * N[i] * N[j];
-                    M_elem[(3 * i, 3 * j)] += val;
-                    M_elem[(3 * i + 1, 3 * j + 1)] += val;
-                    M_elem[(3 * i + 2, 3 * j + 2)] += val;
+                    let val = w * n[i] * n[j];
+                    m_elem[(3 * i, 3 * j)] += val;
+                    m_elem[(3 * i + 1, 3 * j + 1)] += val;
+                    m_elem[(3 * i + 2, 3 * j + 2)] += val;
                 }
             }
         }
-        M_elem
+        m_elem
     }
 
     /// Compute element stiffness and history force for Maxwell viscoelasticity
@@ -187,7 +187,7 @@ impl ElasticityElement {
     pub fn maxwell_viscoelastic(
         nodes: &[Point3<f64>; 10],
         material: &MaxwellViscoelasticity,
-        dt: f64,
+        _dt: f64,
         stress_n: &SMatrix<f64, 6, 1>,
     ) -> (SMatrix<f64, 30, 30>, SMatrix<f64, 30, 1>) {
         let mut K_elem = SMatrix::<f64, 30, 30>::zeros();

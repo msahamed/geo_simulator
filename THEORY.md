@@ -92,3 +92,34 @@ $$\sigma_{effective} = \sigma_{total} - P_{pore}$$
 | **Heat Transport** | Advection + Diffusion | `ndarray` / `rayon` |
 | **Material State** | Integration Points | `nalgebra` |
 | **Topology** | Unstructured Mesh | `petgraph` / Custom |
+| **Material Tracking**| Tracer Swarm (SoA) | `rayon` / `SearchGrid`|
+
+---
+
+## 6. Material Tracking: The Tracer Swarm (Marker-in-Cell)
+
+To track material movement and history (like plastic strain or composition), we use a **Marker-in-Cell** system.
+
+### 6.1 Tracer Advection (RK2)
+We move trillion of "virtual" particles (tracers) through the velocity field computed on the mesh. To balance speed and accuracy, we use the **Midpoint Method (Runge-Kutta 2)**:
+
+1.  **Predictor (Midpoint):**
+    $$\mathbf{x}_{mid} = \mathbf{x}_n + \mathbf{v}(\mathbf{x}_n) \frac{\Delta t}{2}$$
+2.  **Corrector (Final):**
+    $$\mathbf{x}_{n+1} = \mathbf{x}_n + \mathbf{v}(\mathbf{x}_{mid}) \Delta t$$
+
+**Intuitive Understanding:**
+If you are rowing a boat in a swirling river, you don't just look at the water current where you *are*. You look a bit ahead, see where the current is going, and adjust. RK2 does exactly this, preventing particles from "flying off" the curves in the flow.
+
+### 6.2 High-Performance Search Grid
+Finding which of the 1,000,000 elements contains a specific tracer is an expensive search ($O(N)$). Our **SearchGrid** uses spatial binning:
+1.  Divide the domain into a 3D grid of "bins".
+2.  Assign elements to bins based on their bounding boxes.
+3.  When a tracer moves, we only check the elements in its local bin.
+
+**Result:** Lookup time drops from $O(N)$ to **$O(1)$ average**, enabling simulations with millions of tracers to run in seconds.
+
+### 6.3 Marker-to-Element (M2E) Mapping
+The mesh provides the velocity field, but the tracers "carry" the material properties (e.g., density, viscosity, plastic softening).
+*   **Property Averaging:** Elements compute their effective properties by averaging the properties of all tracers inside them.
+*   **Compositional Shifting:** As tracers move, the "material" flows across the mesh, allowing us to simulate subduction, rifting, and mountain building without the mesh itself becoming overly tangled.

@@ -52,3 +52,11 @@ path = "benchmarks/convergence_test.rs"
 [[bin]]
 name = "plastic_shear_banding"
 path = "benchmarks/plastic_shear_banding.rs"
+
+[[bin]]
+name = "tracer_accuracy"
+path = "benchmarks/tracer_accuracy.rs"
+
+[[bin]]
+name = "core_complex"
+path = "benchmarks/core_complex.rs"

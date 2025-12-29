@@ -8,39 +8,45 @@ use super::preconditioner::{Preconditioner, JacobiPreconditioner, IdentityPrecon
 /// Solves Ax = b where A is SPD
 /// Uses optional preconditioning for better convergence
 pub struct ConjugateGradient {
-    /// Maximum iterations
-    max_iterations: usize,
-
-    /// Convergence tolerance (relative residual)
-    tolerance: f64,
-
-    /// Whether to use Jacobi preconditioning
-    use_preconditioner: bool,
-
+    /// Maximum allowed iterations
+    pub max_iterations: usize,
+    /// Relative residual tolerance: ||r|| / ||b||
+    pub tolerance: f64,
+    /// Absolute residual tolerance: ||r||
+    pub abs_tolerance: f64,
+    /// Whether to use preconditioning
+    pub use_preconditioner: bool,
     /// Solver name
     name: String,
 }
 
 impl ConjugateGradient {
-    /// Create new CG solver with defaults
+    /// Create a new Conjugate Gradient solver with default settings
     pub fn new() -> Self {
         Self {
             max_iterations: 1000,
-            tolerance: 1e-8,
+            tolerance: 1e-6,
+            abs_tolerance: 1e-10,
             use_preconditioner: true,
             name: "Conjugate Gradient".to_string(),
         }
     }
 
     /// Set maximum iterations
-    pub fn with_max_iterations(mut self, max_iter: usize) -> Self {
-        self.max_iterations = max_iter;
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
         self
     }
 
-    /// Set convergence tolerance
-    pub fn with_tolerance(mut self, tol: f64) -> Self {
-        self.tolerance = tol;
+    /// Set relative tolerance
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = tolerance;
+        self
+    }
+
+    /// Set absolute tolerance
+    pub fn with_abs_tolerance(mut self, abs_tolerance: f64) -> Self {
+        self.abs_tolerance = abs_tolerance;
         self
     }
 
@@ -52,9 +58,9 @@ impl ConjugateGradient {
 
     /// Preconditioned Conjugate Gradient algorithm
     #[allow(non_snake_case)]
-    fn solve_with_precond<P: Preconditioner>(
+    pub fn solve_with_operator<O: crate::linalg::solver::LinearOperator, P: Preconditioner>(
         &self,
-        A: &CsMat<f64>,
+        a: &O,
         b: &[f64],
         precond: &P,
     ) -> (Vec<f64>, SolverStats) {
@@ -93,15 +99,8 @@ impl ConjugateGradient {
         let mut converged = false;
 
         while iteration < self.max_iterations {
-            // Ap = A * p (manually compute to get dense vector)
-            let mut ap = vec![0.0; n];
-            for (row_idx, row) in A.outer_iterator().enumerate() {
-                let mut sum = 0.0;
-                for (col_idx, &val) in row.iter() {
-                    sum += val * p[col_idx];
-                }
-                ap[row_idx] = sum;
-            }
+            // ap = a * p
+            let ap = a.apply(&p);
 
             // alpha = (r^T z) / (p^T A p)
             let pap: f64 = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum();
@@ -122,11 +121,10 @@ impl ConjugateGradient {
                 r[i] -= alpha * ap[i];
             }
 
-            // Check convergence
             let r_norm = SolverUtils::norm(&r);
             let relative_res = r_norm / b_norm;
 
-            if relative_res < self.tolerance {
+            if (relative_res < self.tolerance) || (r_norm < self.abs_tolerance) {
                 converged = true;
                 iteration += 1;
                 break;
@@ -149,8 +147,8 @@ impl ConjugateGradient {
         }
 
         let solve_time = start.elapsed().as_secs_f64();
-        let residual_norm = SolverUtils::residual_norm(A, &x, b);
-        let relative_residual = SolverUtils::relative_residual(A, &x, b);
+        let residual_norm = SolverUtils::residual_norm(a, &x, b);
+        let relative_residual = SolverUtils::relative_residual(a, &x, b);
 
         let stats = SolverStats {
             iterations: iteration,
@@ -164,6 +162,200 @@ impl ConjugateGradient {
     }
 }
 
+/// BiCGSTAB (Stabilized Bi-Conjugate Gradient) solver for non-symmetric systems
+pub struct BiCGSTAB {
+    max_iterations: usize,
+    tolerance: f64,
+    abs_tolerance: f64,
+    use_preconditioner: bool,
+    name: String,
+}
+
+impl BiCGSTAB {
+    pub fn new() -> Self {
+        Self {
+            max_iterations: 1000,
+            tolerance: 1e-8,
+            abs_tolerance: 1e6, // Safer default for geodynamic scales
+            use_preconditioner: true,
+            name: "BiCGSTAB".to_string(),
+        }
+    }
+
+    pub fn with_max_iterations(mut self, max_iter: usize) -> Self {
+        self.max_iterations = max_iter;
+        self
+    }
+
+    pub fn with_tolerance(mut self, tol: f64) -> Self {
+        self.tolerance = tol;
+        self
+    }
+
+    pub fn with_abs_tolerance(mut self, abs_tol: f64) -> Self {
+        self.abs_tolerance = abs_tol;
+        self
+    }
+
+    pub fn with_preconditioner(mut self, use_precond: bool) -> Self {
+        self.use_preconditioner = use_precond;
+        self
+    }
+
+    #[allow(non_snake_case)]
+    pub fn solve_with_operator<O: crate::linalg::solver::LinearOperator, P: Preconditioner>(
+        &self,
+        a: &O,
+        b: &[f64],
+        precond: &P,
+    ) -> (Vec<f64>, SolverStats) {
+        let n = b.len();
+        let start = Instant::now();
+        let mut x = vec![0.0; n];
+        let mut r = b.to_vec();
+        let r_hat = r.clone(); // Shadow residual
+        
+        let b_norm = SolverUtils::norm(b);
+        if b_norm < 1e-14 {
+            return (x, SolverStats {
+                iterations: 0,
+                residual_norm: 0.0,
+                relative_residual: 0.0,
+                converged: true,
+                solve_time: start.elapsed().as_secs_f64(),
+            });
+        }
+
+        let mut rho = 1.0;
+        let mut alpha = 1.0;
+        let mut omega = 1.0;
+        let mut v = vec![0.0; n];
+        let mut p = vec![0.0; n];
+
+        let mut iteration = 0;
+        let mut converged = false;
+
+        while iteration < self.max_iterations {
+            let rho_prev = rho;
+            rho = r_hat.iter().zip(r.iter()).map(|(&rhi, &ri)| rhi * ri).sum();
+            
+            if rho.abs() < 1e-20 { break; }
+
+            if iteration == 0 {
+                p = r.clone();
+            } else {
+                let beta = (rho / rho_prev) * (alpha / omega);
+                for i in 0..n {
+                    p[i] = r[i] + beta * (p[i] - omega * v[i]);
+                }
+            }
+
+            // y = M^-1 p
+            let y = precond.apply(&p);
+            
+            // v = Ay
+            v = a.apply(&y);
+
+            let r_hat_v: f64 = r_hat.iter().zip(v.iter()).map(|(&rhi, &vi)| rhi * vi).sum();
+            if r_hat_v.abs() < 1e-60 || r_hat_v.is_nan() { 
+                // Stability break
+                break; 
+            }
+            alpha = rho / r_hat_v;
+
+            // s = r - alpha * v
+            let mut s = r.clone();
+            for i in 0..n { s[i] -= alpha * v[i]; }
+            
+            let s_norm = SolverUtils::norm(&s);
+            if (s_norm / b_norm < self.tolerance) || (s_norm < self.abs_tolerance) {
+                for i in 0..n { x[i] += alpha * y[i]; }
+                converged = true;
+                iteration += 1;
+                break;
+            }
+
+            // z = M^-1 s
+            let z = precond.apply(&s);
+
+            // t = Az
+            let t = a.apply(&z);
+
+            let ts: f64 = t.iter().zip(s.iter()).map(|(&ti, &si)| ti * si).sum();
+            let tt: f64 = t.iter().zip(t.iter()).map(|(&ti, &ti2)| ti * ti2).sum();
+            
+            if tt.abs() < 1e-60 || tt.is_nan() {
+                // Stability break - don't update x with omega
+                for i in 0..n { x[i] += alpha * y[i]; }
+                break;
+            }
+            omega = ts / tt;
+
+            // x = x + alpha * y + omega * z
+            for i in 0..n {
+                x[i] += alpha * y[i] + omega * z[i];
+            }
+
+            // r = s - omega * t
+            for i in 0..n {
+                r[i] = s[i] - omega * t[i];
+            }
+
+            let r_norm = SolverUtils::norm(&r);
+            if (r_norm / b_norm < self.tolerance) || (r_norm < self.abs_tolerance) {
+                converged = true;
+                iteration += 1;
+                break;
+            }
+
+            if omega.abs() < 1e-20 { break; }
+            iteration += 1;
+        }
+
+        let stats = SolverStats {
+            iterations: iteration,
+            residual_norm: SolverUtils::residual_norm(a, &x, b),
+            relative_residual: SolverUtils::relative_residual(a, &x, b),
+            converged,
+            solve_time: start.elapsed().as_secs_f64(),
+        };
+
+        (x, stats)
+    }
+}
+
+impl Solver for BiCGSTAB {
+    fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
+        if self.use_preconditioner {
+            let precond = JacobiPreconditioner::new(a);
+            self.solve_with_operator(a, b, &precond)
+        } else {
+            let precond = IdentityPreconditioner;
+            self.solve_with_operator(a, b, &precond)
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn solve_with_operator<O, P>(
+        &self,
+        A: &O,
+        b: &[f64],
+        precond: &P,
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: crate::linalg::solver::LinearOperator,
+        P: Preconditioner,
+    {
+        self.solve_with_operator(A, b, precond)
+    }
+
+    fn name(&self) -> &str { &self.name }
+}
+
+impl Default for BiCGSTAB {
+    fn default() -> Self { Self::new() }
+}
+
 impl Default for ConjugateGradient {
     fn default() -> Self {
         Self::new()
@@ -172,14 +364,28 @@ impl Default for ConjugateGradient {
 
 impl Solver for ConjugateGradient {
     #[allow(non_snake_case)]
-    fn solve(&mut self, A: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
+    fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
         if self.use_preconditioner {
-            let precond = JacobiPreconditioner::new(A);
-            self.solve_with_precond(A, b, &precond)
+            let precond = JacobiPreconditioner::new(a);
+            self.solve_with_operator(a, b, &precond)
         } else {
             let precond = IdentityPreconditioner;
-            self.solve_with_precond(A, b, &precond)
+            self.solve_with_operator(a, b, &precond)
         }
+    }
+
+    #[allow(non_snake_case)]
+    fn solve_with_operator<O, P>(
+        &self,
+        A: &O,
+        b: &[f64],
+        precond: &P,
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: crate::linalg::solver::LinearOperator,
+        P: Preconditioner,
+    {
+        self.solve_with_operator(A, b, precond)
     }
 
     fn name(&self) -> &str {

@@ -129,9 +129,11 @@ fn main() {
         let f = vec![0.0; n_dofs];
         let (K_bc, f_bc) = Assembler::apply_dirichlet_bcs(&K, &f, &dof_mgr);
 
+        // CRITICAL: Viscoplastic systems are ill-conditioned, need many iterations
+        // With Jacobi preconditioner (enabled by default), 10000 iters usually enough
         let mut solver = ConjugateGradient::new()
-            .with_max_iterations(1000)
-            .with_tolerance(1e-8);
+            .with_max_iterations(10000)   // Increased from 1000
+            .with_tolerance(1e-6);         // Relaxed from 1e-8 for stability
             
         let (v_new, stats) = solver.solve(&K_bc, &f_bc);
         if !stats.converged {

@@ -37,6 +37,60 @@ impl Default for SolverStats {
     }
 }
 
+/// Trait for a linear operator A that can be applied to a vector x to get Ax
+pub trait LinearOperator {
+    /// Apply the operator to vector v: out = A * v
+    fn apply(&self, v: &[f64]) -> Vec<f64>;
+
+    /// Apply the operator to vector v and add to out: out += A * v
+    /// Default implementation uses apply() for convenience, but can be optimized
+    fn apply_add(&self, v: &[f64], out: &mut [f64]) {
+        let result = self.apply(v);
+        for (i, &val) in result.iter().enumerate() {
+            out[i] += val;
+        }
+    }
+
+    /// Number of rows (output dimension)
+    fn rows(&self) -> usize;
+
+    /// Number of columns (input dimension)
+    fn cols(&self) -> usize;
+}
+
+impl LinearOperator for CsMat<f64> {
+    fn apply(&self, v: &[f64]) -> Vec<f64> {
+        let n = self.rows();
+        let mut result = vec![0.0; n];
+        for (row_idx, row) in self.outer_iterator().enumerate() {
+            let mut sum = 0.0;
+            for (col_idx, &val) in row.iter() {
+                sum += val * v[col_idx];
+            }
+            result[row_idx] = sum;
+        }
+        result
+    }
+
+    fn apply_add(&self, v: &[f64], out: &mut [f64]) {
+        for (row_idx, row) in self.outer_iterator().enumerate() {
+            let mut sum = 0.0;
+            for (col_idx, &val) in row.iter() {
+                sum += val * v[col_idx];
+            }
+            out[row_idx] += sum;
+        }
+    }
+
+    fn rows(&self) -> usize {
+        self.rows()
+    }
+
+    fn cols(&self) -> usize {
+        self.cols()
+    }
+}
+
 /// Linear system solver trait
 ///
 /// Solves Ax = b for x
@@ -53,6 +107,18 @@ pub trait Solver {
     #[allow(non_snake_case)]
     fn solve(&mut self, A: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats);
 
+    /// Solve the linear system using a generic operator
+    #[allow(non_snake_case)]
+    fn solve_with_operator<O, P>(
+        &self,
+        A: &O,
+        b: &[f64],
+        precond: &P,
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: LinearOperator,
+        P: crate::linalg::preconditioner::Preconditioner;
+
     /// Get solver name
     fn name(&self) -> &str;
 }
@@ -63,19 +129,8 @@ pub struct SolverUtils;
 impl SolverUtils {
     /// Compute residual r = b - Ax
     #[allow(non_snake_case)]
-    pub fn compute_residual(A: &CsMat<f64>, x: &[f64], b: &[f64]) -> Vec<f64> {
-        // Manually compute matrix-vector product to get dense result
-        let n = b.len();
-        let mut ax = vec![0.0; n];
-
-        for (row_idx, row) in A.outer_iterator().enumerate() {
-            let mut sum = 0.0;
-            for (col_idx, &val) in row.iter() {
-                sum += val * x[col_idx];
-            }
-            ax[row_idx] = sum;
-        }
-
+    pub fn compute_residual<O: LinearOperator>(A: &O, x: &[f64], b: &[f64]) -> Vec<f64> {
+        let ax = A.apply(x);
         b.iter()
             .zip(ax.iter())
             .map(|(&bi, &axi)| bi - axi)
@@ -89,14 +144,14 @@ impl SolverUtils {
 
     /// Compute residual norm ||b - Ax||
     #[allow(non_snake_case)]
-    pub fn residual_norm(A: &CsMat<f64>, x: &[f64], b: &[f64]) -> f64 {
+    pub fn residual_norm<O: LinearOperator>(A: &O, x: &[f64], b: &[f64]) -> f64 {
         let r = Self::compute_residual(A, x, b);
         Self::norm(&r)
     }
 
     /// Compute relative residual ||b - Ax|| / ||b||
     #[allow(non_snake_case)]
-    pub fn relative_residual(A: &CsMat<f64>, x: &[f64], b: &[f64]) -> f64 {
+    pub fn relative_residual<O: LinearOperator>(A: &O, x: &[f64], b: &[f64]) -> f64 {
         let r_norm = Self::residual_norm(A, x, b);
         let b_norm = Self::norm(b);
 
