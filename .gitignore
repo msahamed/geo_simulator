@@ -27,3 +27,6 @@ Thumbs.db
 !README.md
 !**/README.md
 !THEORY.md
+
+*.log
+simulation.log

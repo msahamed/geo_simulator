@@ -194,7 +194,7 @@ fn main() {
         jfnk_config.verbose = step % 20 == 0; 
 
         // Linear solver for each Newton iteration
-        let mut linear_solver = ConjugateGradient::new()
+        let mut linear_solver = BiCGSTAB::new()
             .with_max_iterations(10000)
             .with_tolerance(1e-8)
             .with_abs_tolerance(1e7); // Expert recommended for geodynamic scales

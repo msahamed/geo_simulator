@@ -70,9 +70,6 @@ impl ConjugateGradient {
         // Initial guess: x = 0
         let mut x = vec![0.0; n];
 
-        // Initial residual: r = b - Ax = b
-        let mut r = b.to_vec();
-
         // Check if already converged
         let b_norm = SolverUtils::norm(b);
         if b_norm < 1e-14 {
@@ -86,7 +83,12 @@ impl ConjugateGradient {
             return (x, stats);
         }
 
+        let inv_b_norm = 1.0 / b_norm;
+
         // Apply preconditioner: z = M^{-1} r
+        // Initially r = b. We work with normalized r = b * inv_b_norm
+        let r_init_norm: Vec<f64> = b.iter().map(|&bi| bi * inv_b_norm).collect();
+        let mut r = r_init_norm.clone();
         let mut z = precond.apply(&r);
 
         // p = z
@@ -121,10 +123,12 @@ impl ConjugateGradient {
                 r[i] -= alpha * ap[i];
             }
 
-            let r_norm = SolverUtils::norm(&r);
-            let relative_res = r_norm / b_norm;
+            // Check convergence (both relative AND absolute criteria)
+            // Note: r is normalized, so r_norm is the relative residual
+            let rel_res = SolverUtils::norm(&r);
+            let r_norm_abs = rel_res * b_norm;
 
-            if (relative_res < self.tolerance) || (r_norm < self.abs_tolerance) {
+            if (rel_res < self.tolerance) || (r_norm_abs < self.abs_tolerance) {
                 converged = true;
                 iteration += 1;
                 break;
@@ -147,8 +151,15 @@ impl ConjugateGradient {
         }
 
         let solve_time = start.elapsed().as_secs_f64();
+        
+        // Unscale x to the original system
+        for i in 0..n {
+            x[i] *= b_norm;
+        }
+
+        // Final residual norm calculation
         let residual_norm = SolverUtils::residual_norm(a, &x, b);
-        let relative_residual = SolverUtils::relative_residual(a, &x, b);
+        let relative_residual = residual_norm / b_norm;
 
         let stats = SolverStats {
             iterations: iteration,
@@ -211,21 +222,27 @@ impl BiCGSTAB {
     ) -> (Vec<f64>, SolverStats) {
         let n = b.len();
         let start = Instant::now();
+
+        // Initial guess: x = 0
         let mut x = vec![0.0; n];
-        let mut r = b.to_vec();
-        let r_hat = r.clone(); // Shadow residual
-        
+
+        // Check if already converged
         let b_norm = SolverUtils::norm(b);
         if b_norm < 1e-14 {
-            return (x, SolverStats {
+            let stats = SolverStats {
                 iterations: 0,
                 residual_norm: 0.0,
                 relative_residual: 0.0,
                 converged: true,
                 solve_time: start.elapsed().as_secs_f64(),
-            });
+            };
+            return (x, stats);
         }
 
+        let inv_b_norm = 1.0 / b_norm;
+        let mut r: Vec<f64> = b.iter().map(|&bi| bi * inv_b_norm).collect();
+        let r_hat = r.clone(); // Shadow residual
+        
         let mut rho = 1.0;
         let mut alpha = 1.0;
         let mut omega = 1.0;
@@ -253,7 +270,7 @@ impl BiCGSTAB {
             // y = M^-1 p
             let y = precond.apply(&p);
             
-            // v = Ay
+            // v = Ay 
             v = a.apply(&y);
 
             let r_hat_v: f64 = r_hat.iter().zip(v.iter()).map(|(&rhi, &vi)| rhi * vi).sum();
@@ -268,7 +285,8 @@ impl BiCGSTAB {
             for i in 0..n { s[i] -= alpha * v[i]; }
             
             let s_norm = SolverUtils::norm(&s);
-            if (s_norm / b_norm < self.tolerance) || (s_norm < self.abs_tolerance) {
+            let s_norm_abs = s_norm * b_norm;
+            if (s_norm < self.tolerance) || (s_norm_abs < self.abs_tolerance) {
                 for i in 0..n { x[i] += alpha * y[i]; }
                 converged = true;
                 iteration += 1;
@@ -277,10 +295,10 @@ impl BiCGSTAB {
 
             // z = M^-1 s
             let z = precond.apply(&s);
-
+            
             // t = Az
             let t = a.apply(&z);
-
+            
             let ts: f64 = t.iter().zip(s.iter()).map(|(&ti, &si)| ti * si).sum();
             let tt: f64 = t.iter().zip(t.iter()).map(|(&ti, &ti2)| ti * ti2).sum();
             
@@ -301,8 +319,9 @@ impl BiCGSTAB {
                 r[i] = s[i] - omega * t[i];
             }
 
-            let r_norm = SolverUtils::norm(&r);
-            if (r_norm / b_norm < self.tolerance) || (r_norm < self.abs_tolerance) {
+            let rel_res = SolverUtils::norm(&r);
+            let r_norm_abs = rel_res * b_norm;
+            if (rel_res < self.tolerance) || (r_norm_abs < self.abs_tolerance) {
                 converged = true;
                 iteration += 1;
                 break;
@@ -310,6 +329,13 @@ impl BiCGSTAB {
 
             if omega.abs() < 1e-20 { break; }
             iteration += 1;
+        }
+        
+        let solve_time = start.elapsed().as_secs_f64();
+
+        // Unscale x back to original system
+        for i in 0..n {
+            x[i] *= b_norm;
         }
 
         let stats = SolverStats {

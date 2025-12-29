@@ -71,9 +71,9 @@ impl JFNKConfig {
     pub fn conservative() -> Self {
         Self {
             max_newton_iterations: 30,
-            tolerance: 1e-5,
-            abs_tolerance: 1e6,
-            epsilon_fd: 1e-8,
+            tolerance: 1e-4,
+            abs_tolerance: 1e7,
+            epsilon_fd: 1e-7, // Standard JFNK epsilon for stable derivatives
             max_line_search: 15,
             line_search_alpha: 1.0,    // Expert suggestion: start with full step
             line_search_rho: 0.5,
@@ -150,24 +150,34 @@ where
     F: FnMut(&[f64]) -> Vec<f64>,
 {
     fn apply(&self, v: &[f64]) -> Vec<f64> {
-        let v_norm = norm(v);
-        if v_norm < 1e-14 {
-            return vec![0.0; v.len()];
+        let n = v.len();
+        
+        // Stabilize: Ensure v has zeros at Dirichlet nodes for the perturbation
+        // This makes the JFNK operator consistent with the zeroed columns in the preconditioner.
+        let mut v_free = v.to_vec();
+        for i in 0..n {
+            if self.dof_mgr.is_dirichlet(i) {
+                v_free[i] = 0.0;
+            }
+        }
+
+        let v_norm = norm(&v_free);
+        if v_norm < 1e-18 {
+            // If v is purely Dirichlet, the operator acts as char_diag * I
+            let mut jv = vec![0.0; n];
+            for i in 0..n {
+                if self.dof_mgr.is_dirichlet(i) {
+                    jv[i] = v[i] * self.char_diag;
+                }
+            }
+            return jv;
         }
 
         let u_norm = norm(self.u);
         let epsilon = self.epsilon_fd * (1.0 + u_norm) / v_norm;
 
         let mut residual_fn = self.residual_fn.borrow_mut();
-        let mut jv = jacobian_vector_product(&mut *residual_fn, self.u, v, self.r_u, epsilon);
-
-        // Check for NaN
-        for &val in jv.iter() {
-            if val.is_nan() {
-                // println!("WARNING: JFNKJacobian::apply produced NaN!");
-                break;
-            }
-        }
+        let mut jv = jacobian_vector_product(&mut *residual_fn, self.u, &v_free, self.r_u, epsilon);
 
         // Apply Dirichlet BC semantics (system acts as scaled identity for constrained DOFs)
         for i in 0..jv.len() {
