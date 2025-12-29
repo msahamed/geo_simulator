@@ -60,3 +60,11 @@ path = "benchmarks/tracer_accuracy.rs"
 [[bin]]
 name = "core_complex"
 path = "benchmarks/core_complex.rs"
+
+[[bin]]
+name = "two_layer_extension"
+path = "benchmarks/two_layer_extension.rs"
+
+[[bin]]
+name = "two_layer_couette"
+path = "benchmarks/two_layer_couette.rs"

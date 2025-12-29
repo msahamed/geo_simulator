@@ -15,8 +15,9 @@
 /// Softening leads to strain localization.
 
 use geo_simulator::{
-    ImprovedMeshGenerator, Mesh, DofManager, Assembler, Solver, ConjugateGradient, VectorField,
+    ImprovedMeshGenerator, Mesh, DofManager, Assembler, BiCGSTAB, VectorField,
     VtkWriter, ElastoViscoPlastic, PlasticityState, ScalarField,
+    jfnk_solve, JFNKConfig,
 };
 use nalgebra::Point3;
 
@@ -119,26 +120,50 @@ fn main() {
     let mut velocity = vec![0.0; n_dofs];
     let element_pressures = vec![0.0; n_elements]; // Assume zero pressure for this basic test
 
+    // Initialize velocity with linear profile to match BCs
+    for (node_id, node) in mesh.geometry.nodes.iter().enumerate() {
+        let z_normalized = node.z / L;  // 0 to 1
+        velocity[node_id * 3 + 0] = V * (2.0 * z_normalized - 1.0); // -V to +V
+    }
+
     println!("\nStarting Pseudo-Time Integration ({} steps)...", n_steps);
     for step in 1..=n_steps {
         println!("  Step {}:", step);
 
-        // A. Non-linear Piccolo iterations (1 per pseudo-step for performance demo)
-        // In a real application, we'd iterate until convergence.
-        let K = Assembler::assemble_stokes_vep_parallel(&mesh, &dof_mgr, &evp, &velocity, &element_pressures);
-        let f = vec![0.0; n_dofs];
-        let (K_bc, f_bc) = Assembler::apply_dirichlet_bcs(&K, &f, &dof_mgr);
+        // Setup JFNK solver
+        let mut jfnk_config = JFNKConfig::conservative();
+        jfnk_config.verbose = true;  // Show Newton iterations
 
-        // CRITICAL: Viscoplastic systems are ill-conditioned, need many iterations
-        // With Jacobi preconditioner (enabled by default), 10000 iters usually enough
-        let mut solver = ConjugateGradient::new()
-            .with_max_iterations(10000)   // Increased from 1000
-            .with_tolerance(1e-6);         // Relaxed from 1e-8 for stability
-            
-        let (v_new, stats) = solver.solve(&K_bc, &f_bc);
-        if !stats.converged {
-            println!("    WARNING: Solver did not converge (res: {:.3e})", stats.residual_norm);
+        // Linear solver for each Newton iteration
+        let mut linear_solver = BiCGSTAB::new()
+            .with_max_iterations(10000)
+            .with_tolerance(1e-8)
+            .with_abs_tolerance(1e7);
+
+        // Assembler closure
+        let assembler = |v: &[f64]| {
+            let K = Assembler::assemble_stokes_vep_parallel(&mesh, &dof_mgr, &evp, v, &element_pressures);
+            let f = vec![0.0; n_dofs];
+            (K, f)
+        };
+
+        // Solve nonlinear system with JFNK
+        let (v_new, jfnk_stats) = jfnk_solve(
+            assembler,
+            &mut linear_solver,
+            &mut velocity,
+            &dof_mgr,
+            &jfnk_config,
+        );
+
+        if !jfnk_stats.converged {
+            println!("    WARNING: JFNK did not converge! Iters: {}, Residual: {:.3e}",
+                     jfnk_stats.newton_iterations, jfnk_stats.residual_norm);
+        } else {
+            println!("    JFNK converged in {} iterations, residual: {:.3e}",
+                     jfnk_stats.newton_iterations, jfnk_stats.residual_norm);
         }
+
         velocity = v_new;
 
         // B. Update Accumulated Strain (Pseudo-Evolution)

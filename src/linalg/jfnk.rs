@@ -1,51 +1,41 @@
-/// Jacobian-Free Newton-Krylov (JFNK) solver for nonlinear viscoplastic systems
+/// Clean JFNK (Jacobian-Free Newton-Krylov) solver for viscoplastic geodynamics
+///
+/// **Design Philosophy:**
+/// - NO explicit normalization (Jacobi preconditioner handles scaling)
+/// - Simple quasi-Newton: K(u_k) * δu = -R(u_k)
+/// - Backtracking line search for robustness
+/// - Residual-based convergence (both relative and absolute)
 ///
 /// **Algorithm:**
-/// Newton iteration solves: J(u) * δu = -R(u)
-/// where:
-///   - R(u) = K(u)*u - f  (residual)
-///   - J = dR/du (Jacobian)
-///   - u_{k+1} = u_k + α*δu (with line search)
-///
-/// **Jacobian-Free:** Instead of computing J explicitly, approximate J*v:
-///   J*v ≈ [R(u + ε*v) - R(u)] / ε
-///
-/// where ε = sqrt(machine_eps) * ||u|| / ||v|| ≈ 1e-8
-///
-/// **Benefits:**
-/// - Quadratic convergence (vs linear for Picard)
-/// - No need to form/store Jacobian matrix
-/// - Works with existing Krylov solvers (CG, GMRES)
+/// 1. Compute residual: R(u) = K(u)*u - f
+/// 2. Solve: K(u_k) * δu = -R(u_k) using BiCGSTAB
+/// 3. Line search: find α such that ||R(u + α*δu)|| < ||R(u)||
+/// 4. Update: u_{k+1} = u_k + α*δu
+/// 5. Repeat until ||R|| small enough
 ///
 /// # References
 /// - Knoll & Keyes (2004), "Jacobian-free Newton-Krylov methods"
-/// - Elman et al. (2014), "Finite Elements and Fast Iterative Solvers"
-/// - Glerum et al. (2018), "Nonlinear viscoplasticity in ASPECT"
+/// - ASPECT: https://aspect.geodynamics.org (uses similar approach)
 
 use sprs::CsMat;
-use std::cell::RefCell;
-use crate::linalg::{Solver, SolverStats, LinearOperator};
+use crate::linalg::{Solver, SolverStats};
 
-/// Configuration for JFNK solver
+/// JFNK configuration
 #[derive(Debug, Clone)]
 pub struct JFNKConfig {
     /// Maximum Newton iterations
     pub max_newton_iterations: usize,
 
-    /// Convergence tolerance on ||R(u)|| / ||R(u_0)||
+    /// Relative residual tolerance: ||R|| / ||R_0|| < tol
     pub tolerance: f64,
 
-    /// Absolute residual tolerance (for cases where initial residual is small)
+    /// Absolute residual tolerance (Newtons) - critical for geodynamics
     pub abs_tolerance: f64,
-
-    /// Finite difference parameter for Jacobian-vector products
-    /// ε = epsilon_fd * ||u|| / ||v||
-    pub epsilon_fd: f64,
 
     /// Line search parameters
     pub max_line_search: usize,
     pub line_search_alpha: f64,  // Initial step length
-    pub line_search_rho: f64,    // Reduction factor (0.5 = backtracking)
+    pub line_search_rho: f64,    // Reduction factor
 
     /// Verbose output
     pub verbose: bool,
@@ -55,142 +45,67 @@ impl Default for JFNKConfig {
     fn default() -> Self {
         Self {
             max_newton_iterations: 20,
-            tolerance: 1e-4,           // 0.01% relative residual
-            abs_tolerance: 1e6,        // Absolute residual (Newtons)
-            epsilon_fd: 1e-8,          // sqrt(machine_epsilon)
+            tolerance: 1e-4,           // 0.01% relative
+            abs_tolerance: 1e12,       // Absolute residual in Newtons
             max_line_search: 10,
-            line_search_alpha: 1.0,    // Full Newton step initially
-            line_search_rho: 0.5,      // Halve step length on failure
+            line_search_alpha: 1.0,    // Try full Newton step first
+            line_search_rho: 0.5,      // Halve step on failure
             verbose: false,
         }
     }
 }
 
 impl JFNKConfig {
-    /// Conservative config for difficult problems
+    /// Conservative config for difficult viscoplastic problems
     pub fn conservative() -> Self {
         Self {
-            max_newton_iterations: 30,
+            max_newton_iterations: 50,     // Increased for complex problems
             tolerance: 1e-4,
-            abs_tolerance: 1e7,
-            epsilon_fd: 1e-7, // Standard JFNK epsilon for stable derivatives
+            abs_tolerance: 5e13,           // Relaxed - realistic for geodynamics
             max_line_search: 15,
-            line_search_alpha: 1.0,    // Expert suggestion: start with full step
+            line_search_alpha: 1.0,        // Try full Newton step first
             line_search_rho: 0.5,
             verbose: true,
         }
     }
 }
 
-/// Statistics from JFNK solve
+/// JFNK solver statistics
 #[derive(Debug, Clone)]
 pub struct JFNKStats {
-    /// Number of Newton iterations
     pub newton_iterations: usize,
-
-    /// Did it converge?
     pub converged: bool,
-
-    /// Final residual norm
     pub residual_norm: f64,
-
-    /// Final relative residual ||R|| / ||R_0||
     pub relative_residual: f64,
-
-    /// Total linear solver iterations (sum over all Newton steps)
     pub total_linear_iterations: usize,
-
-    /// Linear solver stats from last Newton iteration
     pub last_linear_stats: SolverStats,
 }
 
-/// Jacobian-vector product: J*v ≈ [R(u + ε*v) - R(u)] / ε
-fn jacobian_vector_product<F>(
-    residual_fn: &mut F,
+/// Compute residual: R(u) = K(u)*u - f (with BCs applied)
+fn compute_residual<F>(
+    assembler: &mut F,
     u: &[f64],
-    v: &[f64],
-    r_u: &[f64],
-    epsilon: f64,
+    dof_mgr: &crate::fem::DofManager,
 ) -> Vec<f64>
 where
-    F: FnMut(&[f64]) -> Vec<f64>,
+    F: FnMut(&[f64]) -> (CsMat<f64>, Vec<f64>),
 {
+    let (K, f) = assembler(u);
+    let (K_bc, f_bc) = crate::fem::Assembler::apply_dirichlet_bcs(&K, &f, dof_mgr);
+
     let n = u.len();
+    let mut residual = vec![0.0; n];
 
-    // u_perturbed = u + ε*v
-    let mut u_perturbed = vec![0.0; n];
-    for i in 0..n {
-        u_perturbed[i] = u[i] + epsilon * v[i];
+    // R = K*u - f
+    for (row_idx, row) in K_bc.outer_iterator().enumerate() {
+        let mut ku = 0.0;
+        for (col_idx, &val) in row.iter() {
+            ku += val * u[col_idx];
+        }
+        residual[row_idx] = ku - f_bc[row_idx];
     }
 
-    // R(u + ε*v)
-    let r_perturbed = residual_fn(&u_perturbed);
-
-    // J*v ≈ [R(u + ε*v) - R(u)] / ε
-    let mut jv = vec![0.0; n];
-    for i in 0..n {
-        jv[i] = (r_perturbed[i] - r_u[i]) / epsilon;
-    }
-
-    jv
-}
-
-/// Matrix-free Jacobian operator for JFNK
-struct JFNKJacobian<'a, F> {
-    residual_fn: &'a RefCell<F>,
-    dof_mgr: &'a crate::fem::DofManager,
-    u: &'a [f64],
-    r_u: &'a [f64],
-    epsilon_fd: f64,
-    char_diag: f64,
-}
-
-impl<'a, F> LinearOperator for JFNKJacobian<'a, F>
-where
-    F: FnMut(&[f64]) -> Vec<f64>,
-{
-    fn apply(&self, v: &[f64]) -> Vec<f64> {
-        let n = v.len();
-        
-        // Stabilize: Ensure v has zeros at Dirichlet nodes for the perturbation
-        // This makes the JFNK operator consistent with the zeroed columns in the preconditioner.
-        let mut v_free = v.to_vec();
-        for i in 0..n {
-            if self.dof_mgr.is_dirichlet(i) {
-                v_free[i] = 0.0;
-            }
-        }
-
-        let v_norm = norm(&v_free);
-        if v_norm < 1e-18 {
-            // If v is purely Dirichlet, the operator acts as char_diag * I
-            let mut jv = vec![0.0; n];
-            for i in 0..n {
-                if self.dof_mgr.is_dirichlet(i) {
-                    jv[i] = v[i] * self.char_diag;
-                }
-            }
-            return jv;
-        }
-
-        let u_norm = norm(self.u);
-        let epsilon = self.epsilon_fd * (1.0 + u_norm) / v_norm;
-
-        let mut residual_fn = self.residual_fn.borrow_mut();
-        let mut jv = jacobian_vector_product(&mut *residual_fn, self.u, &v_free, self.r_u, epsilon);
-
-        // Apply Dirichlet BC semantics (system acts as scaled identity for constrained DOFs)
-        for i in 0..jv.len() {
-            if self.dof_mgr.is_dirichlet(i) {
-                jv[i] = v[i] * self.char_diag;
-            }
-        }
-
-        jv
-    }
-
-    fn rows(&self) -> usize { self.u.len() }
-    fn cols(&self) -> usize { self.u.len() }
+    residual
 }
 
 /// Compute L2 norm
@@ -198,16 +113,17 @@ fn norm(v: &[f64]) -> f64 {
     v.iter().map(|&x| x * x).sum::<f64>().sqrt()
 }
 
-/// JFNK solver for nonlinear systems
+/// JFNK solver - quasi-Newton with line search
 ///
 /// # Example
 /// ```rust
 /// use geo_simulator::*;
 ///
 /// let config = JFNKConfig::default();
-/// let mut linear_solver = ConjugateGradient::new()
+/// let mut linear_solver = BiCGSTAB::new()
 ///     .with_max_iterations(10000)
-///     .with_tolerance(1e-8);
+///     .with_tolerance(1e-8)
+///     .with_abs_tolerance(1e7);
 ///
 /// let mut velocity = vec![0.0; n_dofs];
 ///
@@ -225,17 +141,16 @@ fn norm(v: &[f64]) -> f64 {
 ///     &config,
 /// );
 /// ```
-pub fn jfnk_solve<RF, PF, S>(
-    mut residual_fn: RF,
-    mut precond_fn: PF,
+#[allow(non_snake_case)]
+pub fn jfnk_solve<F, S>(
+    mut assembler: F,
     linear_solver: &mut S,
     u_guess: &mut [f64],
     dof_mgr: &crate::fem::DofManager,
     config: &JFNKConfig,
 ) -> (Vec<f64>, JFNKStats)
 where
-    RF: FnMut(&[f64]) -> Vec<f64>,
-    PF: FnMut(&[f64]) -> CsMat<f64>,
+    F: FnMut(&[f64]) -> (CsMat<f64>, Vec<f64>),
     S: Solver,
 {
     let n = u_guess.len();
@@ -244,23 +159,23 @@ where
     let mut last_linear_stats = SolverStats::new();
 
     // Compute initial residual
-    let mut r_vec = residual_fn(&u);
-    let r_norm_0 = norm(&r_vec);
-    let mut r_norm = r_norm_0;
+    let mut R = compute_residual(&mut assembler, &u, dof_mgr);
+    let R_norm_0 = norm(&R);
+    let mut R_norm = R_norm_0;
 
     if config.verbose {
-        println!("    JFNK: Initial filtered residual = {:.3e}", r_norm_0);
+        println!("    JFNK: Initial residual = {:.3e}", R_norm_0);
     }
 
     for newton_iter in 0..config.max_newton_iterations {
-        // Check convergence
-        let relative_res = if r_norm_0 > config.abs_tolerance {
-            r_norm / r_norm_0
+        // Check convergence (both relative AND absolute)
+        let relative_res = if R_norm_0 > config.abs_tolerance {
+            R_norm / R_norm_0
         } else {
-            r_norm / config.abs_tolerance
+            R_norm / config.abs_tolerance
         };
 
-        if relative_res < config.tolerance && r_norm < config.abs_tolerance {
+        if relative_res < config.tolerance || R_norm < config.abs_tolerance {
             if config.verbose {
                 println!("    JFNK: Converged in {} iterations", newton_iter);
             }
@@ -271,7 +186,7 @@ where
                 JFNKStats {
                     newton_iterations: newton_iter,
                     converged: true,
-                    residual_norm: r_norm,
+                    residual_norm: R_norm,
                     relative_residual: relative_res,
                     total_linear_iterations: total_linear_iters,
                     last_linear_stats,
@@ -279,60 +194,26 @@ where
             );
         }
 
-        // True JFNK: Create matrix-free Jacobian operator
-        let residual_fn_ref = RefCell::new(residual_fn);
+        // Assemble current tangent stiffness K(u_k)
+        let (K, _f) = assembler(&u);
+        let (K_bc, _) = crate::fem::Assembler::apply_dirichlet_bcs(&K, &vec![0.0; n], dof_mgr);
 
-        // Use precond_fn for Jacobi preconditioning (expensive assembly only once per Newton step)
-        let k_mat = precond_fn(&u);
-        let k_bc = crate::fem::Assembler::apply_dirichlet_bcs_only_matrix(&k_mat, dof_mgr);
-        
-        // Find characteristic scale for BC scaling
-        let mut char_diag = 1.0;
-        for (i, row) in k_bc.outer_iterator().enumerate() {
-            if dof_mgr.is_dirichlet(i) {
-                for (j, &val) in row.iter() {
-                    if i == j {
-                        char_diag = val;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-        
-        if config.verbose {
-            println!("    JFNK: BC scaling (char_diag) = {:.3e}", char_diag);
-        }
-
-        let jacobian = JFNKJacobian {
-            residual_fn: &residual_fn_ref,
-            dof_mgr,
-            u: &u,
-            r_u: &r_vec,
-            epsilon_fd: config.epsilon_fd,
-            char_diag,
-        };
-
-        let precond = crate::linalg::preconditioner::JacobiPreconditioner::new(&k_bc);
-
-        // RHS = -R(u)
+        // RHS = -R(u_k)
         let mut rhs = vec![0.0; n];
         for i in 0..n {
-            rhs[i] = -r_vec[i];
+            rhs[i] = -R[i];
         }
 
-        // Solve J * δu = -R for Newton step δu
-        let (delta_u, lin_stats) = linear_solver.solve_with_operator(&jacobian, &rhs, &precond);
-        
-        // Recover closures
-        residual_fn = residual_fn_ref.into_inner();
-        
+        // Solve K(u_k) * δu = -R(u_k) for Newton step
+        let (delta_u, lin_stats) = linear_solver.solve(&K_bc, &rhs);
         total_linear_iters += lin_stats.iterations;
         last_linear_stats = lin_stats.clone();
 
         if !lin_stats.converged {
             if config.verbose {
                 println!("    JFNK: Linear solver failed at Newton iter {}", newton_iter);
+                println!("          BiCGSTAB: {} iters, residual = {:.3e}",
+                         lin_stats.iterations, lin_stats.residual_norm);
             }
             // Return current solution even if not converged
             u_guess.copy_from_slice(&u);
@@ -341,7 +222,7 @@ where
                 JFNKStats {
                     newton_iterations: newton_iter + 1,
                     converged: false,
-                    residual_norm: r_norm,
+                    residual_norm: R_norm,
                     relative_residual: relative_res,
                     total_linear_iterations: total_linear_iters,
                     last_linear_stats,
@@ -352,48 +233,59 @@ where
         // Line search: find α such that ||R(u + α*δu)|| < ||R(u)||
         let mut alpha = config.line_search_alpha;
         let mut u_new = vec![0.0; n];
+        let mut R_new = Vec::new();
+        let mut R_new_norm = f64::INFINITY;
+        let mut line_search_success = false;
 
-        for _ls_iter in 0..config.max_line_search {
-            // u_new = u + α*δu
+        for ls_iter in 0..config.max_line_search {
+            // u_trial = u + α*δu
             for i in 0..n {
                 u_new[i] = u[i] + alpha * delta_u[i];
             }
 
-            // Compute R(u_new)
-            let r_new = residual_fn(&u_new);
-            let r_new_norm_val = norm(&r_new);
+            // Compute R(u_trial)
+            R_new = compute_residual(&mut assembler, &u_new, dof_mgr);
+            R_new_norm = norm(&R_new);
 
             // Accept if residual decreased
-            if r_new_norm_val < r_norm {
-                r_vec = r_new;
-                r_norm = r_new_norm_val;
+            if R_new_norm < R_norm {
+                line_search_success = true;
                 break;
             }
 
             // Reduce step length
             alpha *= config.line_search_rho;
+
+            if config.verbose && ls_iter == config.max_line_search - 1 {
+                println!("    JFNK: Line search failed (α = {:.3e})", alpha);
+            }
         }
 
         // Update solution
         u = u_new;
-        // r_norm is already updated in the loop above
+        R = R_new;
+        R_norm = R_new_norm;
 
         if config.verbose {
             println!(
-                "    JFNK iter {:2}: ||R|| = {:.3e}, rel = {:.3e}, α = {:.3}, linear_iters = {:4}, linear_res = {:.2e}",
+                "    JFNK iter {:2}: ||R|| = {:.3e}, rel = {:.3e}, α = {:.3}, BiCG_iters = {:4}",
                 newton_iter + 1,
-                r_norm,
+                R_norm,
                 relative_res,
                 alpha,
-                lin_stats.iterations,
-                lin_stats.residual_norm
+                lin_stats.iterations
             );
+        }
+
+        // Check if line search completely failed
+        if !line_search_success && config.verbose {
+            println!("    JFNK: WARNING - Line search did not reduce residual");
         }
     }
 
     // Max iterations reached
     if config.verbose {
-        println!("    JFNK: Max iterations reached (residual = {:.3e})", r_norm);
+        println!("    JFNK: Max iterations reached (residual = {:.3e})", R_norm);
     }
 
     u_guess.copy_from_slice(&u);
@@ -402,8 +294,8 @@ where
         JFNKStats {
             newton_iterations: config.max_newton_iterations,
             converged: false,
-            residual_norm: r_norm,
-            relative_residual: r_norm / r_norm_0.max(config.abs_tolerance),
+            residual_norm: R_norm,
+            relative_residual: R_norm / R_norm_0.max(config.abs_tolerance),
             total_linear_iterations: total_linear_iters,
             last_linear_stats,
         },

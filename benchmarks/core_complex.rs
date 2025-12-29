@@ -9,7 +9,7 @@
 /// - Physics: Multi-material Visco-Elasto-Plastic (VEP) with tracer tracking.
 
 use geo_simulator::{
-    ImprovedMeshGenerator, DofManager, Assembler, BiCGSTAB, ConjugateGradient, VectorField,
+    ImprovedMeshGenerator, DofManager, Assembler, BiCGSTAB, VectorField,
     VtkWriter, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField,
     jfnk_solve, JFNKConfig, GaussQuadrature, Tet10Basis, StrainDisplacement,
 };
@@ -188,36 +188,47 @@ fn main() {
         // 3. Setup JFNK (Jacobian-Free Newton-Krylov) solver
 
         // JFNK config: Conservative settings for viscoplastic systems
-        // JFNK config: Conservative settings for viscoplastic systems
         let mut jfnk_config = JFNKConfig::conservative();
-        // Show detailed Newton iterations every 0.1 MY (20 steps) to keep console clean
-        jfnk_config.verbose = step % 20 == 0; 
+        // Show detailed Newton iterations every 20 steps to keep console clean
+        jfnk_config.verbose = step % 20 == 0;
 
         // Linear solver for each Newton iteration
+        // CRITICAL: Must use tight abs_tolerance for geodynamic forces (1e7 Newtons)
         let mut linear_solver = BiCGSTAB::new()
             .with_max_iterations(10000)
             .with_tolerance(1e-8)
-            .with_abs_tolerance(1e7); // Expert recommended for geodynamic scales
+            .with_abs_tolerance(1e7);
 
-        // residual_fn: Fast parallel closure for JFNK inner iterations
-        let residual_fn = |v: &[f64]| {
-            Assembler::compute_stokes_residual_parallel(
-                &mesh, &dof_mgr, &materials, &elem_mat_ids, v, &element_pressures, &elem_strains,
-                &gravity_vec, rho_crust, rho_mantle
-            )
-        };
-
-        // precond_fn: Standard parallel assembly for JFNK Jacobi preconditioning
-        let precond_fn = |v: &[f64]| {
-            Assembler::assemble_stokes_vep_multimaterial_parallel(
+        // Assembler closure: Returns (K, f) for current velocity
+        let assembler = |v: &[f64]| {
+            // Assemble K-matrix using current velocity estimate
+            let k_matrix = Assembler::assemble_stokes_vep_multimaterial_parallel(
                 &mesh, &dof_mgr, &materials, &elem_mat_ids, v, &element_pressures, &elem_strains
-            )
+            );
+
+            // Compute gravity RHS (constant, doesn't depend on v)
+            let mut f = vec![0.0; n_dofs];
+            for (elem_id, &mat_id) in elem_mat_ids.iter().enumerate() {
+                let rho = if mat_id == 0 { rho_crust } else { rho_mantle };
+                let elem_nodes = &mesh.connectivity.tet10_elements[elem_id].nodes;
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 { nodes[i] = mesh.geometry.nodes[elem_nodes[i]]; }
+
+                let f_elem = geo_simulator::mechanics::BodyForce::gravity_load(&nodes, rho, &gravity_vec);
+                for i in 0..10 {
+                    for comp in 0..3 {
+                        let gi = dof_mgr.global_dof(elem_nodes[i], comp);
+                        f[gi] += f_elem[3 * i + comp];
+                    }
+                }
+            }
+
+            (k_matrix, f)
         };
 
-        // Solve nonlinear system with optimized JFNK
+        // Solve nonlinear system with clean JFNK (no normalization)
         let (v_new, jfnk_stats) = jfnk_solve(
-            residual_fn,
-            precond_fn,
+            assembler,
             &mut linear_solver,
             &mut velocity,
             &dof_mgr,
