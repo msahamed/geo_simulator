@@ -121,6 +121,18 @@ pub trait Solver {
 
     /// Get solver name
     fn name(&self) -> &str;
+
+    /// Get absolute tolerance
+    fn abs_tolerance(&self) -> f64;
+
+    /// Set absolute tolerance
+    fn set_abs_tolerance(&mut self, tolerance: f64);
+
+    /// Get relative tolerance
+    fn tolerance(&self) -> f64;
+
+    /// Set relative tolerance
+    fn set_tolerance(&mut self, tolerance: f64);
 }
 
 /// Helper functions for solver validation

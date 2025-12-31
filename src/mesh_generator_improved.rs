@@ -134,17 +134,37 @@ impl ImprovedMeshGenerator {
     where
         F: FnMut(&mut Mesh, usize, usize) -> usize,
     {
+        // Check orientation and swap vertices if inverted
+        // Compute Jacobian determinant: det(J) = (v1-v0) · ((v2-v0) × (v3-v0))
+        let p0 = &mesh.geometry.nodes[v0];
+        let p1 = &mesh.geometry.nodes[v1];
+        let p2 = &mesh.geometry.nodes[v2];
+        let p3 = &mesh.geometry.nodes[v3];
+
+        let e1 = nalgebra::Vector3::new(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let e2 = nalgebra::Vector3::new(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+        let e3 = nalgebra::Vector3::new(p3.x - p0.x, p3.y - p0.y, p3.z - p0.z);
+
+        let det_j = e1.dot(&e2.cross(&e3));
+
+        // Swap v2 and v3 if inverted (det < 0)
+        let (v2_corrected, v3_corrected) = if det_j < 0.0 {
+            (v3, v2)  // Swap to fix orientation
+        } else {
+            (v2, v3)
+        };
+
         // Get edge midpoints (will reuse if already created)
         let e01 = get_edge_midpoint(mesh, v0, v1);
-        let e12 = get_edge_midpoint(mesh, v1, v2);
-        let e20 = get_edge_midpoint(mesh, v2, v0);
-        let e03 = get_edge_midpoint(mesh, v0, v3);
-        let e13 = get_edge_midpoint(mesh, v1, v3);
-        let e23 = get_edge_midpoint(mesh, v2, v3);
+        let e12 = get_edge_midpoint(mesh, v1, v2_corrected);
+        let e20 = get_edge_midpoint(mesh, v2_corrected, v0);
+        let e03 = get_edge_midpoint(mesh, v0, v3_corrected);
+        let e13 = get_edge_midpoint(mesh, v1, v3_corrected);
+        let e23 = get_edge_midpoint(mesh, v2_corrected, v3_corrected);
 
         // Create tet10 element
         // Node ordering: [v0, v1, v2, v3, e01, e12, e20, e03, e13, e23]
-        let elem = Tet10Element::new([v0, v1, v2, v3, e01, e12, e20, e03, e13, e23]);
+        let elem = Tet10Element::new([v0, v1, v2_corrected, v3_corrected, e01, e12, e20, e03, e13, e23]);
         mesh.connectivity.add_element(elem);
     }
 }

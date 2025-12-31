@@ -509,10 +509,12 @@ impl Assembler {
         element_mat_ids: &[u32],
         current_velocity: &[f64],
         element_pressures: &[f64],
-        element_strains: &[f64],
-        gravity_vec: &SVector<f64, 3>,
+        element_strains: &[f64], // This changed from StrainVector
+        gravity_vec: &nalgebra::SVector<f64, 3>,
         rho_crust: f64,
         rho_mantle: f64,
+        penalty: f64,
+        char_diag: f64,
     ) -> Vec<f64> {
         let n_dofs = dof_mgr.total_dofs();
 
@@ -533,7 +535,7 @@ impl Assembler {
                 let material = &materials[mat_idx];
                 let eps_p = element_strains[elem_id];
 
-                // 3. Gather nodal velocities
+                // 2. Gather nodal velocities
                 let mut v_elem = SVector::<f64, 30>::zeros();
                 for i in 0..10 {
                     for comp in 0..3 {
@@ -541,7 +543,7 @@ impl Assembler {
                     }
                 }
 
-                // 4. Compute characteristic strain rate for viscosity
+                // 3. Compute characteristic strain rate for viscosity
                 let mut strain_rate_avg = SMatrix::<f64, 6, 1>::zeros();
                 let quad = crate::fem::GaussQuadrature::tet_4point();
                 for (qp, _) in quad.points.iter().zip(quad.weights.iter()) {
@@ -550,12 +552,11 @@ impl Assembler {
                 }
                 strain_rate_avg /= quad.points.len() as f64;
 
-                // 5. Compute effective viscosity
+                // 4. Compute effective viscosity
                 let mu_p = material.plasticity.softened_viscosity(&strain_rate_avg, element_pressures[elem_id], eps_p);
                 let mu_eff = material.viscosity.min(mu_p);
 
-                // 6. Integrate internal forces f_int = ∫ B^T (D B v) dV
-                let penalty = 1e21; // Match the assembly penalty
+                // 5. Integrate internal forces f_int = ∫ B^T (D B v) dV
                 let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff).with_penalty(penalty);
                 let d = temp_viscosity.constitutive_matrix();
 
@@ -572,11 +573,11 @@ impl Assembler {
                     f_int += b.transpose() * stress * w;
                 }
 
-                // 7. Element load f_ext (gravity)
+                // 6. Element load f_ext (gravity)
                 let rho = if mat_idx == 0 { rho_crust } else { rho_mantle };
                 let f_ext = crate::mechanics::BodyForce::gravity_load(&nodes, rho, gravity_vec);
 
-                // 8. Element residual r_e = f_int - f_ext
+                // 7. Element residual r_e = f_int - f_ext
                 f_int - f_ext
             })
             .collect();
@@ -593,10 +594,11 @@ impl Assembler {
             }
         }
 
-        // Apply Dirichlet BCs (residual at constrained DOF is zero)
+        // Apply Dirichlet BCs (residual at constrained DOF is u - v_bc)
+        // This ensures the Jacobian has 1.0 on the diagonal, identical to the Picard matrix.
         for i in 0..n_dofs {
             if dof_mgr.is_dirichlet(i) {
-                global_residual[i] = 0.0;
+                global_residual[i] = (current_velocity[i] - dof_mgr.get_dirichlet_value(i)) * char_diag;
             }
         }
 
@@ -695,7 +697,7 @@ impl Assembler {
         current_velocity: &[f64],
         element_pressures: &[f64],
         element_strains: &[f64],
-    ) -> CsMat<f64> {
+    ) -> (CsMat<f64>, f64) {
         assert_eq!(dof_mgr.dofs_per_node(), 3);
         let n_elements = mesh.num_elements();
         assert_eq!(element_mat_ids.len(), n_elements);
@@ -703,23 +705,19 @@ impl Assembler {
 
         let n_dofs = dof_mgr.total_dofs();
 
-        let element_matrices: Vec<_> = mesh
+        // Compute effective viscosities for all elements to find global max
+        let viscosities: Vec<f64> = mesh
             .connectivity
             .tet10_elements
             .par_iter()
             .enumerate()
             .map(|(elem_id, elem)| {
                 let mut nodes = [Point3::origin(); 10];
-                for i in 0..10 {
-                    nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
-                }
-
-                // 1. Get material and strain
+                for i in 0..10 { nodes[i] = mesh.geometry.nodes[elem.nodes[i]]; }
                 let mat_idx = element_mat_ids[elem_id] as usize;
                 let material = &materials[mat_idx];
                 let eps_p = element_strains[elem_id];
 
-                // 2. Compute strain rate
                 let mut strain_rate = SMatrix::<f64, 6, 1>::zeros();
                 let quad = crate::fem::GaussQuadrature::tet_4point();
                 for (qp, _) in quad.points.iter().zip(quad.weights.iter()) {
@@ -734,21 +732,25 @@ impl Assembler {
                 }
                 strain_rate /= quad.points.len() as f64;
 
-                // 3. Compute effective viscosity
                 let mu_p = material.plasticity.softened_viscosity(&strain_rate, element_pressures[elem_id], eps_p);
-                let mu_eff = material.viscosity.min(mu_p);
-
-                // 4. Element matrix
-            // Use a penalty for incompressibility to regularize the Stokes system.
-            // CRITICAL: Use FIXED penalty (not scaled by viscosity) to avoid ill-conditioning
-            // When μ_eff ~ 1e23, penalty = μ * 1e2 = 1e25 causes condition number explosion!
-            // Fixed penalty of 1e21 works well for geodynamic range
-            let penalty = 1e21;  // Fixed penalty (Pa·s) independent of local viscosity
-            let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff)
-                .with_penalty(penalty); 
-            crate::mechanics::ElasticityElement::viscosity_matrix(&nodes, &temp_viscosity)
+                material.viscosity.min(mu_p)
             })
             .collect();
+
+        // Dynamic Penalty: Scale to be 1x the maximum viscosity in the domain
+        // 100x was causing excessive ill-conditioning (penalty/viscosity ratio).
+        let max_mu = viscosities.par_iter().cloned().reduce(|| 0.0, f64::max);
+        let penalty = (max_mu * 10.0).max(1e21); 
+
+        // Second pass to build element matrices using the global penalty
+        let element_matrices: Vec<_> = mesh.connectivity.tet10_elements.par_iter().enumerate().map(|(id, elem)| {
+            let mu_eff = viscosities[id];
+            let mut elem_nodes = [Point3::origin(); 10];
+            for i in 0..10 { elem_nodes[i] = mesh.geometry.nodes[elem.nodes[i]]; }
+            
+            let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff).with_penalty(penalty);
+            crate::mechanics::ElasticityElement::viscosity_matrix(&elem_nodes, &temp_viscosity)
+        }).collect();
 
         let mut triplets = TriMat::new((n_dofs, n_dofs));
         for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
@@ -765,7 +767,7 @@ impl Assembler {
                 }
             }
         }
-        triplets.to_csr()
+        (triplets.to_csr(), penalty)
     }
 
     /// Assemble global viscosity matrix for Visco-Elasto-Plastic flow (parallel)
@@ -782,9 +784,10 @@ impl Assembler {
             mesh.plasticity_state.as_ref().map_or(0.0, |ps| ps.get(id))
         }).collect::<Vec<_>>();
         
-        Self::assemble_stokes_vep_multimaterial_parallel(
+        let (k, _) = Self::assemble_stokes_vep_multimaterial_parallel(
             mesh, dof_mgr, &[material.clone()], &mat_ids, current_velocity, element_pressures, &strains
-        )
+        );
+        k
     }
 
     /// Assemble global body force vector for gravity

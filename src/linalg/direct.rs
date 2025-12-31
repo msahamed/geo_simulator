@@ -85,6 +85,11 @@ impl Solver for DirectSolver {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn abs_tolerance(&self) -> f64 { 0.0 }
+    fn set_abs_tolerance(&mut self, _tolerance: f64) {}
+    fn tolerance(&self) -> f64 { 0.0 }
+    fn set_tolerance(&mut self, _tolerance: f64) {}
 }
 
 #[cfg(test)]

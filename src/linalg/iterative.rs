@@ -256,7 +256,10 @@ impl BiCGSTAB {
             let rho_prev = rho;
             rho = r_hat.iter().zip(r.iter()).map(|(&rhi, &ri)| rhi * ri).sum();
             
-            if rho.abs() < 1e-20 { break; }
+            if rho.abs() < 1e-20 { 
+                println!("    BiCGSTAB Stability Break: rho too small ({:.3e})", rho);
+                break; 
+            }
 
             if iteration == 0 {
                 p = r.clone();
@@ -269,13 +272,17 @@ impl BiCGSTAB {
 
             // y = M^-1 p
             let y = precond.apply(&p);
+            let _y_norm = SolverUtils::norm(&y);
+            if iteration == 0 && self.max_iterations > 1 {
+                 // println!("    DEBUG BiCGSTAB: p_norm = {:.1e}, y_norm = {:.1e}", SolverUtils::norm(&p), _y_norm);
+            }
             
             // v = Ay 
             v = a.apply(&y);
 
             let r_hat_v: f64 = r_hat.iter().zip(v.iter()).map(|(&rhi, &vi)| rhi * vi).sum();
             if r_hat_v.abs() < 1e-60 || r_hat_v.is_nan() { 
-                // Stability break
+                println!("    BiCGSTAB Stability Break: r_hat_v too small or NaN ({:.3e})", r_hat_v);
                 break; 
             }
             alpha = rho / r_hat_v;
@@ -303,6 +310,7 @@ impl BiCGSTAB {
             let tt: f64 = t.iter().zip(t.iter()).map(|(&ti, &ti2)| ti * ti2).sum();
             
             if tt.abs() < 1e-60 || tt.is_nan() {
+                println!("    BiCGSTAB Stability Break: tt too small or NaN ({:.3e})", tt);
                 // Stability break - don't update x with omega
                 for i in 0..n { x[i] += alpha * y[i]; }
                 break;
@@ -321,6 +329,9 @@ impl BiCGSTAB {
 
             let rel_res = SolverUtils::norm(&r);
             let r_norm_abs = rel_res * b_norm;
+            if iteration % 20 == 0 {
+                println!("      BiCGSTAB iter {:4}: res = {:.3e}", iteration, r_norm_abs);
+            }
             if (rel_res < self.tolerance) || (r_norm_abs < self.abs_tolerance) {
                 converged = true;
                 iteration += 1;
@@ -330,8 +341,6 @@ impl BiCGSTAB {
             if omega.abs() < 1e-20 { break; }
             iteration += 1;
         }
-        
-        let solve_time = start.elapsed().as_secs_f64();
 
         // Unscale x back to original system
         for i in 0..n {
@@ -376,6 +385,10 @@ impl Solver for BiCGSTAB {
     }
 
     fn name(&self) -> &str { &self.name }
+    fn abs_tolerance(&self) -> f64 { self.abs_tolerance }
+    fn set_abs_tolerance(&mut self, tolerance: f64) { self.abs_tolerance = tolerance; }
+    fn tolerance(&self) -> f64 { self.tolerance }
+    fn set_tolerance(&mut self, tolerance: f64) { self.tolerance = tolerance; }
 }
 
 impl Default for BiCGSTAB {
@@ -417,6 +430,10 @@ impl Solver for ConjugateGradient {
     fn name(&self) -> &str {
         &self.name
     }
+    fn abs_tolerance(&self) -> f64 { self.abs_tolerance }
+    fn set_abs_tolerance(&mut self, tolerance: f64) { self.abs_tolerance = tolerance; }
+    fn tolerance(&self) -> f64 { self.tolerance }
+    fn set_tolerance(&mut self, tolerance: f64) { self.tolerance = tolerance; }
 }
 
 #[cfg(test)]

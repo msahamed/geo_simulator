@@ -7,6 +7,7 @@ edition = "2021"
 nalgebra = "0.33"
 rayon = "1.10"
 sprs = "0.11"
+rand = "0.8"
 
 [dev-dependencies]
 approx = "0.5"
@@ -68,3 +69,23 @@ path = "benchmarks/two_layer_extension.rs"
 [[bin]]
 name = "two_layer_couette"
 path = "benchmarks/two_layer_couette.rs"
+
+[[bin]]
+name = "topography_relaxation"
+path = "benchmarks/topography_relaxation.rs"
+
+[[bin]]
+name = "extension_free_surface"
+path = "benchmarks/extension_free_surface.rs"
+
+[[bin]]
+name = "winkler_point_load"
+path = "benchmarks/winkler_point_load.rs"
+
+[[bin]]
+name = "extension_with_winkler"
+path = "benchmarks/extension_with_winkler.rs"
+
+[[bin]]
+name = "mesh_smoothing_distorted"
+path = "benchmarks/mesh_smoothing_distorted.rs"
