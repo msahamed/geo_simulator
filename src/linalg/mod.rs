@@ -7,7 +7,7 @@ pub mod jfnk;
 
 pub use solver::{Solver, SolverStats, LinearOperator};
 pub use direct::DirectSolver;
-pub use iterative::{ConjugateGradient, BiCGSTAB};
+pub use iterative::{ConjugateGradient, BiCGSTAB, GMRES};
 pub use preconditioner::{Preconditioner, JacobiPreconditioner};
 pub use picard::{picard_solve, PicardConfig, PicardStats};
 pub use jfnk::{jfnk_solve, JFNKConfig, JFNKStats};

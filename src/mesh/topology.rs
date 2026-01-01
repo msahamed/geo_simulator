@@ -70,6 +70,20 @@ impl Connectivity {
     pub fn num_elements(&self) -> usize {
         self.tet10_elements.len()
     }
+
+    /// Get all unique vertex (corner) nodes from all elements
+    pub fn corner_nodes(&self) -> Vec<usize> {
+        use std::collections::HashSet;
+        let mut corners = HashSet::new();
+        for elem in &self.tet10_elements {
+            for &node in &elem.nodes[0..4] {
+                corners.insert(node);
+            }
+        }
+        let mut sorted: Vec<usize> = corners.into_iter().collect();
+        sorted.sort_unstable();
+        sorted
+    }
 }
 
 impl Default for Connectivity {

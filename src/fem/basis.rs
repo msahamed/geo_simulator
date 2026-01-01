@@ -23,6 +23,16 @@ use nalgebra::{Matrix3, Matrix4, Point3, Vector3, Vector4};
 pub struct Tet10Basis;
 
 impl Tet10Basis {
+    /// Convert reference coordinates (r, s, t) to barycentric coordinates (L0, L1, L2, L3)
+    pub fn barycentric(qp: &nalgebra::SVector<f64, 3>) -> [f64; 4] {
+        [
+            1.0 - qp[0] - qp[1] - qp[2],
+            qp[0],
+            qp[1],
+            qp[2],
+        ]
+    }
+
     /// Evaluate all 10 shape functions at barycentric coordinates (L0, L1, L2, L3)
     ///
     /// # Arguments

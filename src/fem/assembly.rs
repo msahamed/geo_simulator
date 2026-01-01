@@ -190,7 +190,7 @@ impl Assembler {
             }
         }
     }
-    let char_diag = max_diag;
+    let char_diag = 1.0;
 
     let mut f_new = f.to_vec();
 
@@ -495,31 +495,30 @@ impl Assembler {
                 }
             }
         }
-
         triplets.to_csr()
     }
 
-    /// Fast parallel residual evaluator for Stokes system R = K(u)u - f
-    /// Bypasses global matrix assembly for speed.
+    /// Fast parallel residual evaluator for Mixed Stokes system
+    /// 
+    /// R_u = f_int(u) + B^T p - f_ext
+    /// R_p = B u
     #[allow(non_snake_case)]
     pub fn compute_stokes_residual_parallel(
         mesh: &Mesh,
         dof_mgr: &DofManager,
         materials: &[crate::mechanics::ElastoViscoPlastic],
         element_mat_ids: &[u32],
-        current_velocity: &[f64],
-        element_pressures: &[f64],
-        element_strains: &[f64], // This changed from StrainVector
+        current_sol: &[f64], // [vel_x, vel_y, vel_z, ..., p_1, p_2, ...]
+        element_strains: &[f64], 
         gravity_vec: &nalgebra::SVector<f64, 3>,
         rho_crust: f64,
         rho_mantle: f64,
-        penalty: f64,
-        char_diag: f64,
     ) -> Vec<f64> {
         let n_dofs = dof_mgr.total_dofs();
 
         // Element-wise residual computation in parallel
-        let element_residuals: Vec<SVector<f64, 30>> = mesh
+        // Each element returns a (30 (vel) + 4 (pres)) residual vector
+        let element_residuals: Vec<(SVector<f64, 30>, SVector<f64, 4>)> = mesh
             .connectivity
             .tet10_elements
             .par_iter()
@@ -535,15 +534,23 @@ impl Assembler {
                 let material = &materials[mat_idx];
                 let eps_p = element_strains[elem_id];
 
-                // 2. Gather nodal velocities
+                // 2. Gather nodal velocities (30) and pressures (4)
                 let mut v_elem = SVector::<f64, 30>::zeros();
                 for i in 0..10 {
                     for comp in 0..3 {
-                        v_elem[3 * i + comp] = current_velocity[dof_mgr.global_dof(elem.nodes[i], comp)];
+                        v_elem[3 * i + comp] = current_sol[dof_mgr.velocity_dof(elem.nodes[i], comp)];
                     }
                 }
+                
+                let mut p_elem = SVector::<f64, 4>::zeros();
+                for i in 0..4 {
+                    p_elem[i] = current_sol[dof_mgr.pressure_dof(elem.nodes[i]).expect("Mixed element requires pressure DOFs on corners")];
+                }
 
-                // 3. Compute characteristic strain rate for viscosity
+                // 3. Compute effective viscosity
+                // For plasticity, we use the average element pressure
+                let p_avg = p_elem.sum() / 4.0;
+                
                 let mut strain_rate_avg = SMatrix::<f64, 6, 1>::zeros();
                 let quad = crate::fem::GaussQuadrature::tet_4point();
                 for (qp, _) in quad.points.iter().zip(quad.weights.iter()) {
@@ -552,53 +559,62 @@ impl Assembler {
                 }
                 strain_rate_avg /= quad.points.len() as f64;
 
-                // 4. Compute effective viscosity
-                let mu_p = material.plasticity.softened_viscosity(&strain_rate_avg, element_pressures[elem_id], eps_p);
+                let mu_p = material.plasticity.softened_viscosity(&strain_rate_avg, p_avg, eps_p);
                 let mu_eff = material.viscosity.min(mu_p);
 
-                // 5. Integrate internal forces f_int = ∫ B^T (D B v) dV
-                let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff).with_penalty(penalty);
+                // 4. Compute blocks
+                // f_int = A * v
+                let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff); // Deviatoric only
                 let d = temp_viscosity.constitutive_matrix();
-
+                
                 let mut f_int = SVector::<f64, 30>::zeros();
                 for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
                     let j = crate::fem::Tet10Basis::jacobian(qp, &nodes);
                     let det_j = j.determinant().abs();
                     let b = crate::mechanics::StrainDisplacement::compute_b_at_point(qp, &nodes);
-                    let w = weight * det_j;
-
-                    // Internal force contribution: B^T * (D * (B * v_elem)) * w
-                    let strain = b * v_elem;
-                    let stress = d * strain;
-                    f_int += b.transpose() * stress * w;
+                    f_int += b.transpose() * (d * (b * v_elem)) * (weight * det_j);
                 }
 
-                // 6. Element load f_ext (gravity)
+                // Divergence matrix B and Pressure Gradient B^T
+                let B_block = crate::mechanics::ElasticityElement::stokes_divergence_matrix(&nodes);
+                
+                // R_u = f_int + B^T * p - f_ext
                 let rho = if mat_idx == 0 { rho_crust } else { rho_mantle };
                 let f_ext = crate::mechanics::BodyForce::gravity_load(&nodes, rho, gravity_vec);
+                let r_u = f_int + B_block.transpose() * p_elem - f_ext;
+                
+                // R_p = B * v
+                let r_p = B_block * v_elem;
 
-                // 7. Element residual r_e = f_int - f_ext
-                f_int - f_ext
+                (r_u, r_p)
             })
             .collect();
 
         // Scatter residuals to global vector
         let mut global_residual = vec![0.0; n_dofs];
         for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
-            let re = &element_residuals[elem_id];
+            let (r_u, r_p) = &element_residuals[elem_id];
+            
+            // Scatter velocity residual
             for i in 0..10 {
                 for comp in 0..3 {
-                    let gi = dof_mgr.global_dof(elem.nodes[i], comp);
-                    global_residual[gi] += re[3 * i + comp];
+                    let gi = dof_mgr.velocity_dof(elem.nodes[i], comp);
+                    global_residual[gi] += r_u[3 * i + comp];
                 }
+            }
+            
+            // Scatter pressure residual
+            for i in 0..4 {
+                let gi = dof_mgr.pressure_dof(elem.nodes[i]).unwrap();
+                global_residual[gi] += r_p[i];
             }
         }
 
-        // Apply Dirichlet BCs (residual at constrained DOF is u - v_bc)
-        // This ensures the Jacobian has 1.0 on the diagonal, identical to the Picard matrix.
+        // Apply Dirichlet BCs
+        // Using 1.0 scaling here is consistent with JFNK automated scaling
         for i in 0..n_dofs {
             if dof_mgr.is_dirichlet(i) {
-                global_residual[i] = (current_velocity[i] - dof_mgr.get_dirichlet_value(i)) * char_diag;
+                global_residual[i] = current_sol[i] - dof_mgr.get_dirichlet_value(i);
             }
         }
 
@@ -684,20 +700,18 @@ impl Assembler {
     #[allow(non_snake_case)]
     /// Assemble global viscosity matrix for Multi-Material VEP flow (parallel)
     ///
-    /// # Arguments
-    /// * `materials` - Slice of EVP materials (indexed by element_mat_ids)
-    /// * `element_mat_ids` - Material index for each element
-    /// * `element_strains` - Accumulated plastic strain for each element
-    #[allow(non_snake_case)]
+    /// Assemble global Saddle-Point matrix for Mixed Stokes (parallel)
+    /// 
+    /// K = [ A   B^T ]
+    ///     [ B   0   ]
     pub fn assemble_stokes_vep_multimaterial_parallel(
         mesh: &Mesh,
         dof_mgr: &DofManager,
         materials: &[crate::mechanics::ElastoViscoPlastic],
         element_mat_ids: &[u32],
-        current_velocity: &[f64],
-        element_pressures: &[f64],
+        current_sol: &[f64],
         element_strains: &[f64],
-    ) -> (CsMat<f64>, f64) {
+    ) -> (CsMat<f64>, Vec<f64>, f64) {
         assert_eq!(dof_mgr.dofs_per_node(), 3);
         let n_elements = mesh.num_elements();
         assert_eq!(element_mat_ids.len(), n_elements);
@@ -705,7 +719,7 @@ impl Assembler {
 
         let n_dofs = dof_mgr.total_dofs();
 
-        // Compute effective viscosities for all elements to find global max
+        // 1. Compute effective viscosities
         let viscosities: Vec<f64> = mesh
             .connectivity
             .tet10_elements
@@ -718,56 +732,82 @@ impl Assembler {
                 let material = &materials[mat_idx];
                 let eps_p = element_strains[elem_id];
 
+                let mut v_elem = SVector::<f64, 30>::zeros();
+                for i in 0..10 {
+                    for comp in 0..3 {
+                        v_elem[3 * i + comp] = current_sol[dof_mgr.velocity_dof(elem.nodes[i], comp)];
+                    }
+                }
+                
+                let p_elem: f64 = (0..4).map(|i| current_sol[dof_mgr.pressure_dof(elem.nodes[i]).unwrap()]).sum::<f64>() / 4.0;
+
                 let mut strain_rate = SMatrix::<f64, 6, 1>::zeros();
                 let quad = crate::fem::GaussQuadrature::tet_4point();
                 for (qp, _) in quad.points.iter().zip(quad.weights.iter()) {
                     let B = crate::mechanics::StrainDisplacement::compute_b_at_point(qp, &nodes);
-                    let mut v_elem = SMatrix::<f64, 30, 1>::zeros();
-                    for i in 0..10 {
-                        for comp in 0..3 {
-                            v_elem[3 * i + comp] = current_velocity[dof_mgr.global_dof(elem.nodes[i], comp)];
-                        }
-                    }
                     strain_rate += B * v_elem;
                 }
                 strain_rate /= quad.points.len() as f64;
 
-                let mu_p = material.plasticity.softened_viscosity(&strain_rate, element_pressures[elem_id], eps_p);
+                let mu_p = material.plasticity.softened_viscosity(&strain_rate, p_elem, eps_p);
                 material.viscosity.min(mu_p)
             })
             .collect();
 
-        // Dynamic Penalty: Scale to be 1x the maximum viscosity in the domain
-        // 100x was causing excessive ill-conditioning (penalty/viscosity ratio).
-        let max_mu = viscosities.par_iter().cloned().reduce(|| 0.0, f64::max);
-        let penalty = (max_mu * 10.0).max(1e21); 
+        // 2. Parallel element block computation
+        let element_blocks: Vec<(SMatrix<f64, 30, 30>, SMatrix<f64, 4, 30>)> = mesh
+            .connectivity
+            .tet10_elements
+            .par_iter()
+            .enumerate()
+            .map(|(id, elem)| {
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 { nodes[i] = mesh.geometry.nodes[elem.nodes[i]]; }
+                
+                let mu_eff = viscosities[id];
+                let temp_visc = crate::mechanics::NewtonianViscosity::new(mu_eff);
+                
+                let A_elem = crate::mechanics::ElasticityElement::viscosity_matrix(&nodes, &temp_visc);
+                let B_elem = crate::mechanics::ElasticityElement::stokes_divergence_matrix(&nodes);
+                
+                (A_elem, B_elem)
+            })
+            .collect();
 
-        // Second pass to build element matrices using the global penalty
-        let element_matrices: Vec<_> = mesh.connectivity.tet10_elements.par_iter().enumerate().map(|(id, elem)| {
-            let mu_eff = viscosities[id];
-            let mut elem_nodes = [Point3::origin(); 10];
-            for i in 0..10 { elem_nodes[i] = mesh.geometry.nodes[elem.nodes[i]]; }
-            
-            let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff).with_penalty(penalty);
-            crate::mechanics::ElasticityElement::viscosity_matrix(&elem_nodes, &temp_viscosity)
-        }).collect();
-
+        // 3. Assemble triplets
         let mut triplets = TriMat::new((n_dofs, n_dofs));
-        for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
-            let K_elem = &element_matrices[elem_idx];
+        for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let (A_elem, B_elem) = &element_blocks[elem_id];
+            
+            // Block A (Vel-Vel)
             for i in 0..10 {
-                for ld_i in 0..3 {
-                    let gi = dof_mgr.global_dof(elem.nodes[i], ld_i);
+                for comp_i in 0..3 {
+                    let gi = dof_mgr.velocity_dof(elem.nodes[i], comp_i);
                     for j in 0..10 {
-                        for ld_j in 0..3 {
-                            let gj = dof_mgr.global_dof(elem.nodes[j], ld_j);
-                            triplets.add_triplet(gi, gj, K_elem[(3 * i + ld_i, 3 * j + ld_j)]);
+                        for comp_j in 0..3 {
+                            let gj = dof_mgr.velocity_dof(elem.nodes[j], comp_j);
+                            triplets.add_triplet(gi, gj, A_elem[(3 * i + comp_i, 3 * j + comp_j)]);
                         }
                     }
                 }
             }
+            
+            // Block B (Pres-Vel) and B^T (Vel-Pres)
+            for i in 0..4 {
+                let gi_p = dof_mgr.pressure_dof(elem.nodes[i]).unwrap();
+                for j in 0..10 {
+                    for comp_j in 0..3 {
+                        let gj_v = dof_mgr.velocity_dof(elem.nodes[j], comp_j);
+                        let val = B_elem[(i, 3 * j + comp_j)];
+                        
+                        triplets.add_triplet(gi_p, gj_v, val);     // B
+                        triplets.add_triplet(gj_v, gi_p, val);     // B^T
+                    }
+                }
+            }
         }
-        (triplets.to_csr(), penalty)
+
+        (triplets.to_csr(), vec![0.0; n_dofs], 0.0) 
     }
 
     /// Assemble global viscosity matrix for Visco-Elasto-Plastic flow (parallel)
@@ -775,8 +815,7 @@ impl Assembler {
         mesh: &Mesh,
         dof_mgr: &DofManager,
         material: &crate::mechanics::ElastoViscoPlastic,
-        current_velocity: &[f64],
-        element_pressures: &[f64],
+        current_sol: &[f64],
     ) -> CsMat<f64> {
         let n_elems = mesh.num_elements();
         let mat_ids = vec![0; n_elems];
@@ -784,8 +823,8 @@ impl Assembler {
             mesh.plasticity_state.as_ref().map_or(0.0, |ps| ps.get(id))
         }).collect::<Vec<_>>();
         
-        let (k, _) = Self::assemble_stokes_vep_multimaterial_parallel(
-            mesh, dof_mgr, &[material.clone()], &mat_ids, current_velocity, element_pressures, &strains
+        let (k, _, _) = Self::assemble_stokes_vep_multimaterial_parallel(
+            mesh, dof_mgr, &[material.clone()], &mat_ids, current_sol, &strains
         );
         k
     }

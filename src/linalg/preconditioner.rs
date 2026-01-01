@@ -1,4 +1,5 @@
 use sprs::CsMat;
+use crate::linalg::solver::LinearOperator;
 
 /// Preconditioner trait for iterative solvers
 ///
@@ -103,13 +104,13 @@ impl ILUPreconditioner {
     }
 
     /// Update the preconditions factors in-place using a new matrix A with the SAME sparsity pattern.
-    pub fn update(&mut self, A: &CsMat<f64>) -> Result<(), String> {
-        let n = A.rows();
+    pub fn update(&mut self, a_mat: &CsMat<f64>) -> Result<(), String> {
+        let n = a_mat.rows();
         if n != self.factors.rows() {
             return Err("Size mismatch".to_string());
         }
 
-        self.factors.data_mut().copy_from_slice(A.data());
+        self.factors.data_mut().copy_from_slice(a_mat.data());
 
         let indptr = self.factors.indptr().as_slice().unwrap().to_vec();
         let indices = self.factors.indices().to_vec();
@@ -276,5 +277,64 @@ mod tests {
 
         let result = ILUPreconditioner::new(&A);
         assert!(result.is_err());
+    }
+}
+
+/// Block Triangular Preconditioner for Saddle-Point systems
+///
+/// M = [ A  0 ]
+///     [ B -S ]
+///
+/// Where:
+/// - A is the velocity stiffness block
+/// - B is the divergence block
+/// - S is the Schur complement approximation
+pub struct BlockTriangularPreconditioner<PA: Preconditioner, PS: Preconditioner> {
+    pub a_precond: PA,
+    pub s_precond: PS,
+    pub b_block: CsMat<f64>,
+    pub num_vel_dofs: usize,
+}
+
+impl<PA: Preconditioner, PS: Preconditioner> BlockTriangularPreconditioner<PA, PS> {
+    pub fn new(a_precond: PA, s_precond: PS, b_block: CsMat<f64>, num_vel_dofs: usize) -> Self {
+        Self {
+            a_precond,
+            s_precond,
+            b_block,
+            num_vel_dofs,
+        }
+    }
+}
+
+impl<PA: Preconditioner, PS: Preconditioner> Preconditioner for BlockTriangularPreconditioner<PA, PS> {
+    fn apply(&self, r: &[f64]) -> Vec<f64> {
+        let n = r.len();
+        let nv = self.num_vel_dofs;
+        let np = n - nv;
+        
+        // Split residual: [r_u, r_p]
+        let r_u = &r[0..nv];
+        let r_p = &r[nv..];
+        
+        // 1. Solve A * z_u = r_u
+        let z_u = self.a_precond.apply(r_u);
+        
+        // 2. Compute r_p_new = B * z_u - r_p
+        let bzu = self.b_block.apply(&z_u);
+        let mut r_p_new = vec![0.0; np];
+        for i in 0..np {
+            r_p_new[i] = bzu[i] - r_p[i];
+        }
+        
+        // 3. Solve S * z_p = r_p_new
+        let z_p = self.s_precond.apply(&r_p_new);
+        
+        // Concatenate: [z_u, z_p]
+        let mut z = vec![0.0; n];
+        z[0..nv].copy_from_slice(&z_u);
+        z[nv..].copy_from_slice(&z_p);
+        
+        z
     }
 }

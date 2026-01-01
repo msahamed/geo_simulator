@@ -2,16 +2,26 @@ use std::collections::HashSet;
 
 /// Degree of Freedom (DOF) manager
 ///
-/// Handles DOF numbering and boundary condition tracking for FEM assembly
+/// Handles DOF numbering and boundary condition tracking for FEM assembly.
+/// Supports both simple fixed-DOF systems and Mixed (P2-P1) formulations.
 #[derive(Debug, Clone)]
 pub struct DofManager {
     /// Number of nodes in the mesh
     num_nodes: usize,
 
-    /// Number of DOFs per node (1 for scalar, 3 for vector)
-    dofs_per_node: usize,
+    /// Number of velocity DOFs per node (usually 3)
+    vel_dofs_per_node: usize,
 
-    /// Total number of DOFs
+    /// Total velocity DOFs (placed first in segregated ordering)
+    total_vel_dofs: usize,
+
+    /// Total number of pressure DOFs (placed after velocity)
+    num_pressure_dofs: usize,
+
+    /// Mapping from node_id to pressure DOF index (if any)
+    pressure_node_map: Vec<Option<usize>>,
+
+    /// Total number of DOFs (Vel + Pres)
     total_dofs: usize,
 
     /// Set of DOFs with Dirichlet boundary conditions
@@ -22,36 +32,77 @@ pub struct DofManager {
 }
 
 impl DofManager {
-    /// Create a new DOF manager
-    ///
-    /// # Arguments
-    /// * `num_nodes` - Total number of nodes in mesh
-    /// * `dofs_per_node` - Number of DOFs per node (1=scalar, 3=vector)
+    /// Create a new DOF manager for a fixed number of DOFs per node
+    /// (e.g., pure thermal, pure elasticity, or penalty Stokes)
     pub fn new(num_nodes: usize, dofs_per_node: usize) -> Self {
         let total_dofs = num_nodes * dofs_per_node;
 
         Self {
             num_nodes,
-            dofs_per_node,
+            vel_dofs_per_node: dofs_per_node,
+            total_vel_dofs: total_dofs,
+            num_pressure_dofs: 0,
+            pressure_node_map: vec![None; num_nodes],
             total_dofs,
             dirichlet_dofs: HashSet::new(),
             dirichlet_values: vec![0.0; total_dofs],
         }
     }
 
-    /// Get the global DOF index for a node and local DOF
+    /// Create a new DOF manager for a Mixed P2-P1 formulation
     ///
     /// # Arguments
-    /// * `node_id` - Node index (0-based)
-    /// * `local_dof` - Local DOF index (0 for scalar, 0-2 for vector)
-    ///
-    /// # Returns
-    /// Global DOF index
-    pub fn global_dof(&self, node_id: usize, local_dof: usize) -> usize {
-        debug_assert!(node_id < self.num_nodes, "Node ID out of bounds");
-        debug_assert!(local_dof < self.dofs_per_node, "Local DOF out of bounds");
+    /// * `num_nodes` - Total number of nodes (including mid-edges)
+    /// * `corner_nodes` - Indices of nodes that also have a pressure DOF (usually element vertices)
+    pub fn new_mixed(num_nodes: usize, corner_nodes: &[usize]) -> Self {
+        let vel_dofs_per_node = 3;
+        let total_vel_dofs = num_nodes * vel_dofs_per_node;
+        
+        // Identify unique pressure nodes and create mapping
+        let unique_corners: HashSet<usize> = corner_nodes.iter().cloned().collect();
+        let mut sorted_corners: Vec<usize> = unique_corners.into_iter().collect();
+        sorted_corners.sort_unstable();
+        
+        let mut pressure_node_map = vec![None; num_nodes];
+        for (idx, &node_id) in sorted_corners.iter().enumerate() {
+            pressure_node_map[node_id] = Some(idx);
+        }
+        
+        let num_pressure_dofs = sorted_corners.len();
+        let total_dofs = total_vel_dofs + num_pressure_dofs;
 
-        node_id * self.dofs_per_node + local_dof
+        Self {
+            num_nodes,
+            vel_dofs_per_node,
+            total_vel_dofs,
+            num_pressure_dofs,
+            pressure_node_map,
+            total_dofs,
+            dirichlet_dofs: HashSet::new(),
+            dirichlet_values: vec![0.0; total_dofs],
+        }
+    }
+
+    /// Get the global velocity DOF index for a node and component
+    pub fn velocity_dof(&self, node_id: usize, component: usize) -> usize {
+        debug_assert!(node_id < self.num_nodes);
+        debug_assert!(component < self.vel_dofs_per_node);
+        node_id * self.vel_dofs_per_node + component
+    }
+
+    /// Get the global pressure DOF index for a node
+    pub fn pressure_dof(&self, node_id: usize) -> Option<usize> {
+        self.pressure_node_map[node_id].map(|idx| self.total_vel_dofs + idx)
+    }
+
+    /// Backwards compatible global_dof lookup
+    /// (Treats local_dof < vel_dofs_per_node as velocity, otherwise pressure)
+    pub fn global_dof(&self, node_id: usize, local_dof: usize) -> usize {
+        if local_dof < self.vel_dofs_per_node {
+            self.velocity_dof(node_id, local_dof)
+        } else {
+            self.pressure_dof(node_id).expect("Node has no pressure DOF")
+        }
     }
 
     /// Apply Dirichlet boundary condition to a DOF
@@ -72,7 +123,7 @@ impl DofManager {
     /// * `node_id` - Node index
     /// * `value` - Prescribed value for all DOFs at this node
     pub fn set_dirichlet_node(&mut self, node_id: usize, value: f64) {
-        for local_dof in 0..self.dofs_per_node {
+        for local_dof in 0..self.vel_dofs_per_node {
             let dof = self.global_dof(node_id, local_dof);
             self.set_dirichlet(dof, value);
         }
@@ -105,12 +156,27 @@ impl DofManager {
 
     /// Get DOFs per node
     pub fn dofs_per_node(&self) -> usize {
-        self.dofs_per_node
+        self.vel_dofs_per_node
     }
 
     /// Get number of nodes
     pub fn num_nodes(&self) -> usize {
         self.num_nodes
+    }
+
+    /// Get total velocity DOFs
+    pub fn total_vel_dofs(&self) -> usize {
+        self.total_vel_dofs
+    }
+
+    /// Get total pressure DOFs
+    pub fn total_pressure_dofs(&self) -> usize {
+        self.num_pressure_dofs
+    }
+
+    /// Get pressure node map
+    pub fn pressure_node_map(&self) -> &Vec<Option<usize>> {
+        &self.pressure_node_map
     }
 }
 

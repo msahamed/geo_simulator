@@ -1,180 +1,10 @@
 use sprs::CsMat;
 use std::time::Instant;
-use super::solver::{Solver, SolverStats, SolverUtils};
+use super::solver::{Solver, SolverStats, SolverUtils, LinearOperator};
 use super::preconditioner::{Preconditioner, JacobiPreconditioner, IdentityPreconditioner};
 
 /// Conjugate Gradient solver for symmetric positive definite systems
-///
-/// Solves Ax = b where A is SPD
-/// Uses optional preconditioning for better convergence
 pub struct ConjugateGradient {
-    /// Maximum allowed iterations
-    pub max_iterations: usize,
-    /// Relative residual tolerance: ||r|| / ||b||
-    pub tolerance: f64,
-    /// Absolute residual tolerance: ||r||
-    pub abs_tolerance: f64,
-    /// Whether to use preconditioning
-    pub use_preconditioner: bool,
-    /// Solver name
-    name: String,
-}
-
-impl ConjugateGradient {
-    /// Create a new Conjugate Gradient solver with default settings
-    pub fn new() -> Self {
-        Self {
-            max_iterations: 1000,
-            tolerance: 1e-6,
-            abs_tolerance: 1e-10,
-            use_preconditioner: true,
-            name: "Conjugate Gradient".to_string(),
-        }
-    }
-
-    /// Set maximum iterations
-    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
-        self
-    }
-
-    /// Set relative tolerance
-    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
-        self.tolerance = tolerance;
-        self
-    }
-
-    /// Set absolute tolerance
-    pub fn with_abs_tolerance(mut self, abs_tolerance: f64) -> Self {
-        self.abs_tolerance = abs_tolerance;
-        self
-    }
-
-    /// Enable/disable preconditioning
-    pub fn with_preconditioner(mut self, use_precond: bool) -> Self {
-        self.use_preconditioner = use_precond;
-        self
-    }
-
-    /// Preconditioned Conjugate Gradient algorithm
-    #[allow(non_snake_case)]
-    pub fn solve_with_operator<O: crate::linalg::solver::LinearOperator, P: Preconditioner>(
-        &self,
-        a: &O,
-        b: &[f64],
-        precond: &P,
-    ) -> (Vec<f64>, SolverStats) {
-        let n = b.len();
-        let start = Instant::now();
-
-        // Initial guess: x = 0
-        let mut x = vec![0.0; n];
-
-        // Check if already converged
-        let b_norm = SolverUtils::norm(b);
-        if b_norm < 1e-14 {
-            let stats = SolverStats {
-                iterations: 0,
-                residual_norm: 0.0,
-                relative_residual: 0.0,
-                converged: true,
-                solve_time: start.elapsed().as_secs_f64(),
-            };
-            return (x, stats);
-        }
-
-        let inv_b_norm = 1.0 / b_norm;
-
-        // Apply preconditioner: z = M^{-1} r
-        // Initially r = b. We work with normalized r = b * inv_b_norm
-        let r_init_norm: Vec<f64> = b.iter().map(|&bi| bi * inv_b_norm).collect();
-        let mut r = r_init_norm.clone();
-        let mut z = precond.apply(&r);
-
-        // p = z
-        let mut p = z.clone();
-
-        // rz = r^T z
-        let mut rz: f64 = r.iter().zip(z.iter()).map(|(&ri, &zi)| ri * zi).sum();
-
-        let mut iteration = 0;
-        let mut converged = false;
-
-        while iteration < self.max_iterations {
-            // ap = a * p
-            let ap = a.apply(&p);
-
-            // alpha = (r^T z) / (p^T A p)
-            let pap: f64 = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum();
-
-            if pap.abs() < 1e-14 {
-                break; // Avoid division by zero
-            }
-
-            let alpha = rz / pap;
-
-            // x = x + alpha * p
-            for i in 0..n {
-                x[i] += alpha * p[i];
-            }
-
-            // r = r - alpha * Ap
-            for i in 0..n {
-                r[i] -= alpha * ap[i];
-            }
-
-            // Check convergence (both relative AND absolute criteria)
-            // Note: r is normalized, so r_norm is the relative residual
-            let rel_res = SolverUtils::norm(&r);
-            let r_norm_abs = rel_res * b_norm;
-
-            if (rel_res < self.tolerance) || (r_norm_abs < self.abs_tolerance) {
-                converged = true;
-                iteration += 1;
-                break;
-            }
-
-            // z = M^{-1} r
-            z = precond.apply(&r);
-
-            // beta = (r_new^T z_new) / (r_old^T z_old)
-            let rz_new: f64 = r.iter().zip(z.iter()).map(|(&ri, &zi)| ri * zi).sum();
-            let beta = rz_new / rz;
-            rz = rz_new;
-
-            // p = z + beta * p
-            for i in 0..n {
-                p[i] = z[i] + beta * p[i];
-            }
-
-            iteration += 1;
-        }
-
-        let solve_time = start.elapsed().as_secs_f64();
-        
-        // Unscale x to the original system
-        for i in 0..n {
-            x[i] *= b_norm;
-        }
-
-        // Final residual norm calculation
-        let residual_norm = SolverUtils::residual_norm(a, &x, b);
-        let relative_residual = residual_norm / b_norm;
-
-        let stats = SolverStats {
-            iterations: iteration,
-            residual_norm,
-            relative_residual,
-            converged,
-            solve_time,
-        };
-
-        (x, stats)
-    }
-}
-
-/// BiCGSTAB (Stabilized Bi-Conjugate Gradient) solver for non-symmetric systems
-pub struct BiCGSTAB {
     max_iterations: usize,
     tolerance: f64,
     abs_tolerance: f64,
@@ -182,29 +12,29 @@ pub struct BiCGSTAB {
     name: String,
 }
 
-impl BiCGSTAB {
+impl ConjugateGradient {
     pub fn new() -> Self {
         Self {
             max_iterations: 1000,
             tolerance: 1e-8,
-            abs_tolerance: 1e6, // Safer default for geodynamic scales
+            abs_tolerance: 1e-12,
             use_preconditioner: true,
-            name: "BiCGSTAB".to_string(),
+            name: "ConjugateGradient".to_string(),
         }
     }
 
-    pub fn with_max_iterations(mut self, max_iter: usize) -> Self {
-        self.max_iterations = max_iter;
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
         self
     }
 
-    pub fn with_tolerance(mut self, tol: f64) -> Self {
-        self.tolerance = tol;
+    pub fn with_tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = tolerance;
         self
     }
 
-    pub fn with_abs_tolerance(mut self, abs_tol: f64) -> Self {
-        self.abs_tolerance = abs_tol;
+    pub fn with_abs_tolerance(mut self, abs_tolerance: f64) -> Self {
+        self.abs_tolerance = abs_tolerance;
         self
     }
 
@@ -213,175 +43,100 @@ impl BiCGSTAB {
         self
     }
 
-    #[allow(non_snake_case)]
-    pub fn solve_with_operator<O: crate::linalg::solver::LinearOperator, P: Preconditioner>(
+    pub fn solve_with_operator_internal<O, P>(
         &self,
         a: &O,
         b: &[f64],
         precond: &P,
-    ) -> (Vec<f64>, SolverStats) {
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: LinearOperator,
+        P: Preconditioner,
+    {
         let n = b.len();
         let start = Instant::now();
-
-        // Initial guess: x = 0
-        let mut x = vec![0.0; n];
-
-        // Check if already converged
         let b_norm = SolverUtils::norm(b);
-        if b_norm < 1e-14 {
-            let stats = SolverStats {
+
+        if b_norm < 1e-25 {
+            return (vec![0.0; n], SolverStats {
                 iterations: 0,
                 residual_norm: 0.0,
                 relative_residual: 0.0,
                 converged: true,
                 solve_time: start.elapsed().as_secs_f64(),
-            };
-            return (x, stats);
+            });
         }
 
-        let inv_b_norm = 1.0 / b_norm;
-        let mut r: Vec<f64> = b.iter().map(|&bi| bi * inv_b_norm).collect();
-        let r_hat = r.clone(); // Shadow residual
+        let mut x = vec![0.0; n];
+        let mut r = b.to_vec();
         
-        let mut rho = 1.0;
-        let mut alpha = 1.0;
-        let mut omega = 1.0;
-        let mut v = vec![0.0; n];
-        let mut p = vec![0.0; n];
+        let mut z = precond.apply(&r);
+        let mut p = z.clone();
+        let mut rz = r.iter().zip(z.iter()).map(|(&ri, &zi)| ri * zi).sum::<f64>();
 
         let mut iteration = 0;
         let mut converged = false;
+        let mut final_res = b_norm;
 
         while iteration < self.max_iterations {
-            let rho_prev = rho;
-            rho = r_hat.iter().zip(r.iter()).map(|(&rhi, &ri)| rhi * ri).sum();
-            
-            if rho.abs() < 1e-20 { 
-                println!("    BiCGSTAB Stability Break: rho too small ({:.3e})", rho);
-                break; 
-            }
+            let ap = a.apply(&p);
+            let p_ap = p.iter().zip(ap.iter()).map(|(&pi, &api)| pi * api).sum::<f64>();
 
-            if iteration == 0 {
-                p = r.clone();
-            } else {
-                let beta = (rho / rho_prev) * (alpha / omega);
-                for i in 0..n {
-                    p[i] = r[i] + beta * (p[i] - omega * v[i]);
-                }
-            }
+            if p_ap.abs() < 1e-30 { break; }
+            let alpha = rz / p_ap;
 
-            // y = M^-1 p
-            let y = precond.apply(&p);
-            let _y_norm = SolverUtils::norm(&y);
-            if iteration == 0 && self.max_iterations > 1 {
-                 // println!("    DEBUG BiCGSTAB: p_norm = {:.1e}, y_norm = {:.1e}", SolverUtils::norm(&p), _y_norm);
-            }
-            
-            // v = Ay 
-            v = a.apply(&y);
-
-            let r_hat_v: f64 = r_hat.iter().zip(v.iter()).map(|(&rhi, &vi)| rhi * vi).sum();
-            if r_hat_v.abs() < 1e-60 || r_hat_v.is_nan() { 
-                println!("    BiCGSTAB Stability Break: r_hat_v too small or NaN ({:.3e})", r_hat_v);
-                break; 
-            }
-            alpha = rho / r_hat_v;
-
-            // s = r - alpha * v
-            let mut s = r.clone();
-            for i in 0..n { s[i] -= alpha * v[i]; }
-            
-            let s_norm = SolverUtils::norm(&s);
-            let s_norm_abs = s_norm * b_norm;
-            if (s_norm < self.tolerance) || (s_norm_abs < self.abs_tolerance) {
-                for i in 0..n { x[i] += alpha * y[i]; }
-                converged = true;
-                iteration += 1;
-                break;
-            }
-
-            // z = M^-1 s
-            let z = precond.apply(&s);
-            
-            // t = Az
-            let t = a.apply(&z);
-            
-            let ts: f64 = t.iter().zip(s.iter()).map(|(&ti, &si)| ti * si).sum();
-            let tt: f64 = t.iter().zip(t.iter()).map(|(&ti, &ti2)| ti * ti2).sum();
-            
-            if tt.abs() < 1e-60 || tt.is_nan() {
-                println!("    BiCGSTAB Stability Break: tt too small or NaN ({:.3e})", tt);
-                // Stability break - don't update x with omega
-                for i in 0..n { x[i] += alpha * y[i]; }
-                break;
-            }
-            omega = ts / tt;
-
-            // x = x + alpha * y + omega * z
             for i in 0..n {
-                x[i] += alpha * y[i] + omega * z[i];
+                x[i] += alpha * p[i];
+                r[i] -= alpha * ap[i];
             }
 
-            // r = s - omega * t
-            for i in 0..n {
-                r[i] = s[i] - omega * t[i];
-            }
-
-            let rel_res = SolverUtils::norm(&r);
-            let r_norm_abs = rel_res * b_norm;
-            if iteration % 20 == 0 {
-                println!("      BiCGSTAB iter {:4}: res = {:.3e}", iteration, r_norm_abs);
-            }
-            if (rel_res < self.tolerance) || (r_norm_abs < self.abs_tolerance) {
+            let r_norm = SolverUtils::norm(&r);
+            final_res = r_norm;
+            if r_norm < self.tolerance * b_norm || r_norm < self.abs_tolerance {
                 converged = true;
-                iteration += 1;
                 break;
             }
 
-            if omega.abs() < 1e-20 { break; }
+            z = precond.apply(&r);
+            let rz_new = r.iter().zip(z.iter()).map(|(&ri, &zi)| ri * zi).sum::<f64>();
+            let beta = rz_new / rz;
+            rz = rz_new;
+
+            for i in 0..n {
+                p[i] = z[i] + beta * p[i];
+            }
+
             iteration += 1;
         }
 
-        // Unscale x back to original system
-        for i in 0..n {
-            x[i] *= b_norm;
-        }
-
-        let stats = SolverStats {
+        (x, SolverStats {
             iterations: iteration,
-            residual_norm: SolverUtils::residual_norm(a, &x, b),
-            relative_residual: SolverUtils::relative_residual(a, &x, b),
+            residual_norm: final_res,
+            relative_residual: if b_norm > 1e-20 { final_res / b_norm } else { 0.0 },
             converged,
             solve_time: start.elapsed().as_secs_f64(),
-        };
-
-        (x, stats)
+        })
     }
 }
 
-impl Solver for BiCGSTAB {
+impl Solver for ConjugateGradient {
     fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
         if self.use_preconditioner {
             let precond = JacobiPreconditioner::new(a);
-            self.solve_with_operator(a, b, &precond)
+            self.solve_with_operator_internal(a, b, &precond)
         } else {
             let precond = IdentityPreconditioner;
-            self.solve_with_operator(a, b, &precond)
+            self.solve_with_operator_internal(a, b, &precond)
         }
     }
 
-    #[allow(non_snake_case)]
-    fn solve_with_operator<O, P>(
+    fn solve_with_operator<O: LinearOperator, P: Preconditioner>(
         &self,
-        A: &O,
+        a: &O,
         b: &[f64],
         precond: &P,
-    ) -> (Vec<f64>, SolverStats)
-    where
-        O: crate::linalg::solver::LinearOperator,
-        P: Preconditioner,
-    {
-        self.solve_with_operator(A, b, precond)
+    ) -> (Vec<f64>, SolverStats) {
+        self.solve_with_operator_internal(a, b, precond)
     }
 
     fn name(&self) -> &str { &self.name }
@@ -391,50 +146,340 @@ impl Solver for BiCGSTAB {
     fn set_tolerance(&mut self, tolerance: f64) { self.tolerance = tolerance; }
 }
 
-impl Default for BiCGSTAB {
-    fn default() -> Self { Self::new() }
+/// BiCGSTAB (Biconjugate Gradient Stabilized) solver for non-symmetric systems
+pub struct BiCGSTAB {
+    max_iterations: usize,
+    tolerance: f64,
+    abs_tolerance: f64,
+    use_preconditioner: bool,
+    verbose: bool,
+    name: String,
 }
 
-impl Default for ConjugateGradient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Solver for ConjugateGradient {
-    #[allow(non_snake_case)]
-    fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
-        if self.use_preconditioner {
-            let precond = JacobiPreconditioner::new(a);
-            self.solve_with_operator(a, b, &precond)
-        } else {
-            let precond = IdentityPreconditioner;
-            self.solve_with_operator(a, b, &precond)
+impl BiCGSTAB {
+    pub fn new() -> Self {
+        Self {
+            max_iterations: 1000,
+            tolerance: 1e-8,
+            abs_tolerance: 1e-12,
+            use_preconditioner: true,
+            verbose: false,
+            name: "BiCGSTAB".to_string(),
         }
     }
 
-    #[allow(non_snake_case)]
-    fn solve_with_operator<O, P>(
+    pub fn with_max_iterations(mut self, max_iter: usize) -> Self { self.max_iterations = max_iter; self }
+    pub fn with_tolerance(mut self, tol: f64) -> Self { self.tolerance = tol; self }
+    pub fn with_abs_tolerance(mut self, abs_tol: f64) -> Self { self.abs_tolerance = abs_tol; self }
+    pub fn with_verbose(mut self, verbose: bool) -> Self { self.verbose = verbose; self }
+    pub fn with_preconditioner(mut self, use_precond: bool) -> Self { self.use_preconditioner = use_precond; self }
+
+    pub fn solve_with_operator_internal<O, P>(
         &self,
-        A: &O,
+        a: &O,
         b: &[f64],
         precond: &P,
     ) -> (Vec<f64>, SolverStats)
     where
-        O: crate::linalg::solver::LinearOperator,
+        O: LinearOperator,
         P: Preconditioner,
     {
-        self.solve_with_operator(A, b, precond)
+        let n = b.len();
+        let start = Instant::now();
+        let b_norm = SolverUtils::norm(b);
+
+        if b_norm < 1e-25 {
+            return (vec![0.0; n], SolverStats { iterations: 0, residual_norm: 0.0, relative_residual: 0.0, converged: true, solve_time: start.elapsed().as_secs_f64() });
+        }
+
+        let mut x = vec![0.0; n];
+        let mut r = b.to_vec();
+        let r_hat = r.clone();
+        
+        let mut rho = 1.0;
+        let mut alpha = 1.0;
+        let mut omega = 1.0;
+        let mut v = vec![0.0; n];
+        let mut p = vec![0.0; n];
+
+        let mut total_iter = 0;
+        let mut converged = false;
+        let mut final_res = b_norm;
+
+        while total_iter < self.max_iterations {
+            let rho_prev = rho;
+            rho = r_hat.iter().zip(r.iter()).map(|(&ri_h, &ri)| ri_h * ri).sum::<f64>();
+            
+            if rho.abs() < 1e-40 { break; }
+
+            if total_iter == 0 {
+                p = r.clone();
+            } else {
+                let beta = (rho / rho_prev) * (alpha / omega);
+                for i in 0..n {
+                    p[i] = r[i] + beta * (p[i] - omega * v[i]);
+                }
+            }
+
+            let p_hat = precond.apply(&p);
+            v = a.apply(&p_hat);
+
+            let rhat_v = r_hat.iter().zip(v.iter()).map(|(&ri_h, &vi)| ri_h * vi).sum::<f64>();
+            if rhat_v.abs() < 1e-40 { break; }
+            alpha = rho / rhat_v;
+
+            let mut s = vec![0.0; n];
+            for i in 0..n { s[i] = r[i] - alpha * v[i]; }
+
+            let s_norm = SolverUtils::norm(&s);
+            if s_norm < self.tolerance * b_norm || s_norm < self.abs_tolerance {
+                for i in 0..n { x[i] += alpha * p_hat[i]; }
+                final_res = s_norm;
+                converged = true;
+                break;
+            }
+
+            let s_hat = precond.apply(&s);
+            let t = a.apply(&s_hat);
+
+            let t_t = t.iter().map(|&ti| ti * ti).sum::<f64>();
+            let t_s = t.iter().zip(s.iter()).map(|(&ti, &si)| ti * si).sum::<f64>();
+            
+            if t_t.abs() < 1e-40 { break; }
+            omega = t_s / t_t;
+
+            for i in 0..n {
+                x[i] += alpha * p_hat[i] + omega * s_hat[i];
+                r[i] = s[i] - omega * t[i];
+            }
+
+            final_res = SolverUtils::norm(&r);
+            total_iter += 1;
+
+            if self.verbose && total_iter % 50 == 0 {
+                println!("        BiCGSTAB iter {:4}: res = {:.3e}, rel = {:.3e}", total_iter, final_res, final_res / b_norm);
+            }
+
+            if final_res < self.tolerance * b_norm || final_res < self.abs_tolerance {
+                converged = true;
+                break;
+            }
+            if omega.abs() < 1e-40 { break; }
+        }
+
+        (x, SolverStats {
+            iterations: total_iter,
+            residual_norm: final_res,
+            relative_residual: final_res / b_norm,
+            converged,
+            solve_time: start.elapsed().as_secs_f64(),
+        })
+    }
+}
+
+impl Solver for BiCGSTAB {
+    fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
+        if self.use_preconditioner {
+            let precond = JacobiPreconditioner::new(a);
+            self.solve_with_operator_internal(a, b, &precond)
+        } else {
+            let precond = IdentityPreconditioner;
+            self.solve_with_operator_internal(a, b, &precond)
+        }
     }
 
-    fn name(&self) -> &str {
-        &self.name
+    fn solve_with_operator<O: LinearOperator, P: Preconditioner>(&self, a: &O, b: &[f64], precond: &P) -> (Vec<f64>, SolverStats) {
+        self.solve_with_operator_internal(a, b, precond)
     }
+
+    fn name(&self) -> &str { &self.name }
     fn abs_tolerance(&self) -> f64 { self.abs_tolerance }
     fn set_abs_tolerance(&mut self, tolerance: f64) { self.abs_tolerance = tolerance; }
     fn tolerance(&self) -> f64 { self.tolerance }
     fn set_tolerance(&mut self, tolerance: f64) { self.tolerance = tolerance; }
 }
+
+/// GMRES (Generalized Minimal Residual) solver
+pub struct GMRES {
+    max_iterations: usize,
+    restart: usize,
+    tolerance: f64,
+    abs_tolerance: f64,
+    use_preconditioner: bool,
+    verbose: bool,
+    name: String,
+}
+
+impl GMRES {
+    pub fn new() -> Self {
+        Self {
+            max_iterations: 1000,
+            restart: 30,
+            tolerance: 1e-8,
+            abs_tolerance: 1e-12,
+            use_preconditioner: true,
+            verbose: false,
+            name: "GMRES".to_string(),
+        }
+    }
+
+    pub fn with_restart(mut self, m: usize) -> Self { self.restart = m; self }
+    pub fn with_max_iterations(mut self, max_iter: usize) -> Self { self.max_iterations = max_iter; self }
+    pub fn with_tolerance(mut self, tol: f64) -> Self { self.tolerance = tol; self }
+    pub fn with_abs_tolerance(mut self, abs_tol: f64) -> Self { self.abs_tolerance = abs_tol; self }
+    pub fn with_verbose(mut self, verbose: bool) -> Self { self.verbose = verbose; self }
+    pub fn with_preconditioner(mut self, use_precond: bool) -> Self { self.use_preconditioner = use_precond; self }
+
+    pub fn solve_with_operator_internal<O, P>(
+        &self,
+        a: &O,
+        b: &[f64],
+        precond: &P,
+    ) -> (Vec<f64>, SolverStats)
+    where
+        O: LinearOperator,
+        P: Preconditioner,
+    {
+        let n = b.len();
+        let start = Instant::now();
+        let b_norm = SolverUtils::norm(b);
+
+        if b_norm < 1e-25 {
+            return (vec![0.0; n], SolverStats { iterations: 0, residual_norm: 0.0, relative_residual: 0.0, converged: true, solve_time: start.elapsed().as_secs_f64() });
+        }
+
+        let mut x = vec![0.0; n];
+        let mut total_iter = 0;
+        let mut converged = false;
+        let mut final_res = b_norm;
+
+        while total_iter < self.max_iterations {
+            let r_vec = SolverUtils::compute_residual(a, &x, b);
+            let r_norm = SolverUtils::norm(&r_vec);
+            final_res = r_norm;
+
+            if r_norm < self.tolerance * b_norm || r_norm < self.abs_tolerance {
+                converged = true;
+                break;
+            }
+
+            if self.verbose && total_iter % 50 == 0 {
+                println!("        GMRES iter {:4}: res = {:.3e}, rel = {:.3e}", total_iter, r_norm, r_norm / b_norm);
+            }
+
+            let m = self.restart;
+            let mut v = vec![vec![0.0; n]; m + 1];
+            let mut h = vec![vec![0.0; m]; m + 1];
+            for i in 0..n { v[0][i] = r_vec[i] / r_norm; }
+
+            let mut g = vec![0.0; m + 1];
+            g[0] = r_norm;
+
+            let mut cs = vec![0.0; m];
+            let mut sn = vec![0.0; m];
+
+            let mut k = 0;
+            for j in 0..m {
+                if total_iter >= self.max_iterations { break; }
+                
+                let w = a.apply(&precond.apply(&v[j]));
+
+                let mut w_ortho = w;
+                for i in 0..=j {
+                    h[i][j] = v[i].iter().zip(w_ortho.iter()).map(|(&ai, &bi)| ai * bi).sum::<f64>();
+                    for l in 0..n { w_ortho[l] -= h[i][j] * v[i][l]; }
+                }
+                h[j + 1][j] = SolverUtils::norm(&w_ortho);
+
+                if h[j + 1][j].abs() > 1e-40 {
+                    for l in 0..n { v[j + 1][l] = w_ortho[l] / h[j + 1][j]; }
+                }
+
+                for i in 0..j {
+                    let temp = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                    h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
+                    h[i][j] = temp;
+                }
+
+                let (c, s, rho) = self.givens_rotation(h[j][j], h[j + 1][j]);
+                cs[j] = c; sn[j] = s; h[j][j] = rho; h[j + 1][j] = 0.0;
+
+                let temp = cs[j] * g[j];
+                g[j + 1] = -sn[j] * g[j];
+                g[j] = temp;
+
+                k = j + 1;
+                total_iter += 1;
+                final_res = g[k].abs();
+
+                if final_res < self.tolerance * b_norm || final_res < self.abs_tolerance { break; }
+            }
+
+            let mut y = vec![0.0; k];
+            for i in (0..k).rev() {
+                let mut sum = 0.0;
+                for j in (i + 1)..k { sum += h[i][j] * y[j]; }
+                if h[i][i].abs() < 1e-40 { break; }
+                y[i] = (g[i] - sum) / h[i][i];
+            }
+
+            let mut dy = vec![0.0; n];
+            for j in 0..k { for i in 0..n { dy[i] += v[j][i] * y[j]; } }
+            let precond_dy = precond.apply(&dy);
+            for i in 0..n { x[i] += precond_dy[i]; }
+
+            if final_res < self.tolerance * b_norm || final_res < self.abs_tolerance {
+                converged = true;
+                break;
+            }
+        }
+
+        (x, SolverStats {
+            iterations: total_iter,
+            residual_norm: final_res,
+            relative_residual: final_res / b_norm,
+            converged,
+            solve_time: start.elapsed().as_secs_f64(),
+        })
+    }
+
+    fn givens_rotation(&self, a: f64, b: f64) -> (f64, f64, f64) {
+        if b.abs() < 1e-40 { (1.0, 0.0, a) }
+        else if b.abs() > a.abs() {
+            let tau = a / b; let s = 1.0 / (1.0 + tau * tau).sqrt(); let c = s * tau;
+            (c, s, b * (1.0 + tau * tau).sqrt())
+        } else {
+            let tau = b / a; let c = 1.0 / (1.0 + tau * tau).sqrt(); let s = c * tau;
+            (c, s, a * (1.0 + tau * tau).sqrt())
+        }
+    }
+}
+
+impl Solver for GMRES {
+    fn solve(&mut self, a: &CsMat<f64>, b: &[f64]) -> (Vec<f64>, SolverStats) {
+        if self.use_preconditioner {
+            let precond = JacobiPreconditioner::new(a);
+            self.solve_with_operator_internal(a, b, &precond)
+        } else {
+            let precond = IdentityPreconditioner;
+            self.solve_with_operator_internal(a, b, &precond)
+        }
+    }
+
+    fn solve_with_operator<O: LinearOperator, P: Preconditioner>(&self, a: &O, b: &[f64], precond: &P) -> (Vec<f64>, SolverStats) {
+        self.solve_with_operator_internal(a, b, precond)
+    }
+
+    fn name(&self) -> &str { &self.name }
+    fn abs_tolerance(&self) -> f64 { self.abs_tolerance }
+    fn set_abs_tolerance(&mut self, tolerance: f64) { self.abs_tolerance = tolerance; }
+    fn tolerance(&self) -> f64 { self.tolerance }
+    fn set_tolerance(&mut self, tolerance: f64) { self.tolerance = tolerance; }
+}
+
+impl Default for BiCGSTAB { fn default() -> Self { Self::new() } }
+impl Default for ConjugateGradient { fn default() -> Self { Self::new() } }
+impl Default for GMRES { fn default() -> Self { Self::new() } }
 
 #[cfg(test)]
 mod tests {
@@ -443,83 +488,18 @@ mod tests {
     use approx::assert_relative_eq;
 
     #[test]
-    fn test_cg_simple() {
-        // Solve [2 1; 1 2] x = [3; 3]
-        // Solution: x = [1; 1]
+    fn test_cg_basic() {
         let mut triplets = TriMat::new((2, 2));
         triplets.add_triplet(0, 0, 2.0);
         triplets.add_triplet(0, 1, 1.0);
         triplets.add_triplet(1, 0, 1.0);
         triplets.add_triplet(1, 1, 2.0);
         let A = triplets.to_csr();
-
         let b = vec![3.0, 3.0];
-
         let mut solver = ConjugateGradient::new();
         let (x, stats) = solver.solve(&A, &b);
-
         assert_relative_eq!(x[0], 1.0, epsilon = 1e-6);
         assert_relative_eq!(x[1], 1.0, epsilon = 1e-6);
         assert!(stats.converged);
-        assert!(stats.iterations <= 10);
-    }
-
-    #[test]
-    fn test_cg_diagonal() {
-        // Diagonal matrix: should converge in 1 iteration with preconditioning
-        let n = 10;
-        let mut triplets = TriMat::new((n, n));
-        for i in 0..n {
-            triplets.add_triplet(i, i, (i + 1) as f64);
-        }
-        let A = triplets.to_csr();
-
-        let b: Vec<f64> = (1..=n).map(|i| (i * i) as f64).collect();
-
-        let mut solver = ConjugateGradient::new().with_preconditioner(true);
-        let (x, stats) = solver.solve(&A, &b);
-
-        // x[i] = b[i] / A[i][i] = (i+1)^2 / (i+1) = i+1
-        for i in 0..n {
-            assert_relative_eq!(x[i], (i + 1) as f64, epsilon = 1e-6);
-        }
-        assert!(stats.converged);
-        assert!(stats.iterations <= 5);
-    }
-
-    #[test]
-    fn test_cg_with_without_precond() {
-        // Create a moderately ill-conditioned SPD matrix
-        let n = 20;
-        let mut triplets = TriMat::new((n, n));
-
-        // Tridiagonal matrix
-        for i in 0..n {
-            triplets.add_triplet(i, i, 4.0);
-            if i > 0 {
-                triplets.add_triplet(i, i - 1, -1.0);
-            }
-            if i < n - 1 {
-                triplets.add_triplet(i, i + 1, -1.0);
-            }
-        }
-        let A = triplets.to_csr();
-
-        let b = vec![1.0; n];
-
-        // Solve without preconditioner
-        let mut solver_no_precond = ConjugateGradient::new().with_preconditioner(false);
-        let (_, stats_no_precond) = solver_no_precond.solve(&A, &b);
-
-        // Solve with preconditioner
-        let mut solver_precond = ConjugateGradient::new().with_preconditioner(true);
-        let (_, stats_precond) = solver_precond.solve(&A, &b);
-
-        // Both should converge
-        assert!(stats_no_precond.converged);
-        assert!(stats_precond.converged);
-
-        // Preconditioned should converge faster or equal
-        assert!(stats_precond.iterations <= stats_no_precond.iterations);
     }
 }

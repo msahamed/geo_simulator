@@ -156,6 +156,76 @@ impl ElasticityElement {
         m_elem
     }
 
+    /// Compute element divergence matrix for Mixed (Saddle-Point) Stokes
+    ///
+    /// B_e = ∫ q (∇ · v) dV
+    ///
+    /// where:
+    /// - q is the linear pressure test function (4 per element)
+    /// - v is the quadratic velocity trial function (30 per element)
+    ///
+    /// # Arguments
+    /// * `nodes` - Physical coordinates of 10 Tet10 nodes
+    ///
+    /// # Returns
+    /// 4×30 divergence matrix
+    #[allow(non_snake_case)]
+    pub fn stokes_divergence_matrix(
+        nodes: &[Point3<f64>; 10],
+    ) -> SMatrix<f64, 4, 30> {
+        let mut b_elem = SMatrix::<f64, 4, 30>::zeros();
+        
+        // 4-point quadrature (degree 2)
+        let quad = GaussQuadrature::tet_4point();
+
+        for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            let j = Tet10Basis::jacobian(qp, nodes);
+            let det_j = j.determinant().abs();
+            let dN_dx = Tet10Basis::shape_derivatives_cartesian(qp, nodes);
+            
+            // Pressure linear basis functions q_i are the barycentric coords L_i
+            let q = qp; 
+            
+            let w = weight * det_j;
+
+            for i in 0..4 { // Pressure nodes
+                for k in 0..10 { // Velocity nodes
+                    b_elem[(i, 3 * k)]     += q[i] * dN_dx[k][0] * w;
+                    b_elem[(i, 3 * k + 1)] += q[i] * dN_dx[k][1] * w;
+                    b_elem[(i, 3 * k + 2)] += q[i] * dN_dx[k][2] * w;
+                }
+            }
+        }
+        b_elem
+    }
+
+    /// Compute element pressure mass matrix
+    ///
+    /// M_p = ∫ q_i q_j dV
+    ///
+    /// Used for Schur complement preconditioning (S ≈ M_p / μ)
+    pub fn pressure_mass_matrix(
+        nodes: &[Point3<f64>; 10],
+    ) -> SMatrix<f64, 4, 4> {
+        let mut m_p = SMatrix::<f64, 4, 4>::zeros();
+        let quad = GaussQuadrature::tet_4point();
+
+        for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
+            let j = Tet10Basis::jacobian(qp, nodes);
+            let det_j = j.determinant().abs();
+            let q = qp; 
+            
+            let w = weight * det_j;
+
+            for i in 0..4 {
+                for j in 0..4 {
+                    m_p[(i, j)] += q[i] * q[j] * w;
+                }
+            }
+        }
+        m_p
+    }
+
     /// Compute element stiffness and history force for Maxwell viscoelasticity
     ///
     /// Returns:
