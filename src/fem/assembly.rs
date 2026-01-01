@@ -509,7 +509,7 @@ impl Assembler {
         materials: &[crate::mechanics::ElastoViscoPlastic],
         element_mat_ids: &[u32],
         current_sol: &[f64], // [vel_x, vel_y, vel_z, ..., p_1, p_2, ...]
-        element_strains: &[f64], 
+        element_strains: &[f64],
         gravity_vec: &nalgebra::SVector<f64, 3>,
         rho_crust: f64,
         rho_mantle: f64,
@@ -541,7 +541,7 @@ impl Assembler {
                         v_elem[3 * i + comp] = current_sol[dof_mgr.velocity_dof(elem.nodes[i], comp)];
                     }
                 }
-                
+
                 let mut p_elem = SVector::<f64, 4>::zeros();
                 for i in 0..4 {
                     p_elem[i] = current_sol[dof_mgr.pressure_dof(elem.nodes[i]).expect("Mixed element requires pressure DOFs on corners")];
@@ -566,7 +566,7 @@ impl Assembler {
                 // f_int = A * v
                 let temp_viscosity = crate::mechanics::NewtonianViscosity::new(mu_eff); // Deviatoric only
                 let d = temp_viscosity.constitutive_matrix();
-                
+
                 let mut f_int = SVector::<f64, 30>::zeros();
                 for (qp, weight) in quad.points.iter().zip(quad.weights.iter()) {
                     let j = crate::fem::Tet10Basis::jacobian(qp, &nodes);
@@ -577,12 +577,12 @@ impl Assembler {
 
                 // Divergence matrix B and Pressure Gradient B^T
                 let B_block = crate::mechanics::ElasticityElement::stokes_divergence_matrix(&nodes);
-                
+
                 // R_u = f_int + B^T * p - f_ext
                 let rho = if mat_idx == 0 { rho_crust } else { rho_mantle };
                 let f_ext = crate::mechanics::BodyForce::gravity_load(&nodes, rho, gravity_vec);
                 let r_u = f_int + B_block.transpose() * p_elem - f_ext;
-                
+
                 // R_p = B * v
                 let r_p = B_block * v_elem;
 

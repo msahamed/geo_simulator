@@ -11,5 +11,5 @@ pub use mesh_generator::MeshGenerator;
 pub use mesh_generator_improved::ImprovedMeshGenerator;
 pub use physics::{ThermalField, PressureField, HillslopeDiffusion};
 pub use fem::{Tet10Basis, GaussQuadrature, DofManager, ElementMatrix, Assembler, BoundaryConditions, BoundaryFace, BackwardEuler, TimeStepStats};
-pub use linalg::{Solver, DirectSolver, ConjugateGradient, BiCGSTAB, GMRES, picard_solve, PicardConfig, PicardStats, jfnk_solve, JFNKConfig, JFNKStats};
+pub use linalg::{Solver, DirectSolver, ConjugateGradient, BiCGSTAB, GMRES, picard_solve, PicardConfig, PicardStats, jfnk_solve, jfnk_solve_nondimensional, JFNKConfig, JFNKStats, CharacteristicScales};
 pub use mechanics::{IsotropicElasticity, NewtonianViscosity, MaxwellViscoelasticity, StrainDisplacement, ElasticityElement, BodyForce, update_stresses_maxwell, DruckerPrager, ElastoViscoPlastic, WinklerFoundation};

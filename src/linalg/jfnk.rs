@@ -20,6 +20,7 @@
 use sprs::CsMat;
 use crate::linalg::solver::{Solver, SolverStats};
 use crate::linalg::preconditioner::{ILUPreconditioner, Preconditioner};
+use crate::linalg::scaling::CharacteristicScales;
 
 /// JFNK configuration
 #[derive(Debug, Clone)]
@@ -425,4 +426,129 @@ where
         total_linear_iterations: total_linear_iters,
         last_linear_stats,
     })
+}
+
+/// JFNK solver with automatic non-dimensionalization
+///
+/// **Key Improvement:** This wrapper automatically scales the problem to O(1) variables,
+/// making the solver much more robust for geodynamic problems with extreme parameter ranges.
+///
+/// # How it works
+/// 1. Takes physical units input (velocities in m/s, pressures in Pa)
+/// 2. Converts to dimensionless O(1) variables using characteristic scales
+/// 3. Solves the dimensionless system (residuals ~ O(1))
+/// 4. Converts solution back to physical units
+///
+/// # Benefits
+/// - Residuals are O(1) instead of O(10^13) → better convergence criteria
+/// - Condition numbers improve by orders of magnitude
+/// - Tolerances like 1e-6 actually mean "6 digits of accuracy"
+/// - Preconditioners work much better
+///
+/// # Arguments
+/// * `assembler` - Assembles matrix/RHS in PHYSICAL units
+/// * `residual_evaluator` - Computes residual in PHYSICAL units
+/// * `linear_solver` - Linear solver (same as regular JFNK)
+/// * `u_guess_phys` - Initial guess in PHYSICAL units [m/s, Pa]
+/// * `dof_mgr` - DOF manager
+/// * `config` - JFNK configuration (tolerances are for DIMENSIONLESS residuals)
+/// * `scales` - Characteristic scales for non-dimensionalization
+///
+/// # Returns
+/// Solution in PHYSICAL units [m/s, Pa] and statistics
+///
+/// # Example
+/// ```rust
+/// let scales = CharacteristicScales::new(100_000.0, 1e-9, 1e21, 3000.0, 9.81);
+/// let mut config = JFNKConfig::conservative();
+/// config.tolerance = 1e-6;      // 6 digits in dimensionless space
+/// config.abs_tolerance = 1e-8;  // Absolute floor in dimensionless space
+///
+/// let (sol_phys, stats) = jfnk_solve_nondimensional(
+///     assembler, residual_evaluator, &mut gmres, &mut u_guess, &dof_mgr, &config, &scales
+/// );
+/// ```
+#[allow(non_snake_case)]
+pub fn jfnk_solve_nondimensional<FA, FR, S>(
+    mut assembler: FA,
+    mut residual_evaluator: FR,
+    linear_solver: &mut S,
+    u_guess_phys: &mut [f64],
+    dof_mgr: &crate::fem::DofManager,
+    config: &JFNKConfig,
+    scales: &CharacteristicScales,
+) -> (Vec<f64>, JFNKStats)
+where
+    FA: FnMut(&[f64]) -> (CsMat<f64>, Vec<f64>, f64),
+    FR: FnMut(&[f64]) -> Vec<f64>,
+    S: Solver,
+{
+    if config.verbose {
+        println!("\n  ╔════════════════════════════════════════════════════════════╗");
+        println!("  ║  JFNK with Non-dimensionalization                          ║");
+        println!("  ╚════════════════════════════════════════════════════════════╝");
+        scales.print_summary();
+    }
+
+    // 1. Convert initial guess to dimensionless
+    let mut u_guess_nd = scales.nondim_solution(u_guess_phys, dof_mgr);
+
+    // 2. Wrap assembler: physical input → physical output (JFNK handles scaling internally)
+    //    The assembler stays in physical units for simplicity
+    let assembler_nd = |u_nd: &[f64]| {
+        // Convert dimensionless solution to physical for assembly
+        let u_phys = scales.dim_solution(u_nd, dof_mgr);
+
+        // Assemble in physical units
+        let (K_phys, f_phys, energy) = assembler(&u_phys);
+
+        // Return physical matrix and RHS (JFNK internal scaling handles the rest)
+        (K_phys, f_phys, energy)
+    };
+
+    // 3. Wrap residual evaluator: dimensionless input → dimensionless output
+    let residual_nd = |u_nd: &[f64]| {
+        // Convert to physical
+        let u_phys = scales.dim_solution(u_nd, dof_mgr);
+
+        // Compute residual in physical units
+        let r_phys = residual_evaluator(&u_phys);
+
+        // Convert residual to dimensionless
+        scales.nondim_residual(&r_phys, dof_mgr)
+    };
+
+    // 4. Solve in dimensionless space
+    //    Config tolerances now apply to O(1) dimensionless residuals
+    let (u_sol_nd, stats) = jfnk_solve(
+        assembler_nd,
+        residual_nd,
+        linear_solver,
+        &mut u_guess_nd,
+        dof_mgr,
+        config,
+    );
+
+    // 5. Convert solution back to physical units
+    let u_sol_phys = scales.dim_solution(&u_sol_nd, dof_mgr);
+
+    // 6. Compute TRUE dimensionless residual for reporting
+    //    (The stats.residual_norm is in equilibrated units, not pure dimensionless)
+    let r_final_phys = residual_evaluator(&u_sol_phys);
+    let r_final_nd = scales.nondim_residual(&r_final_phys, dof_mgr);
+    let r_final_nd_norm = r_final_nd.iter().map(|&x| x * x).sum::<f64>().sqrt();
+
+    if config.verbose {
+        println!("  ╔════════════════════════════════════════════════════════════╗");
+        println!("  ║  JFNK Non-dimensional: Converged = {}                      ║", stats.converged);
+        println!("  ║  TRUE Dimensionless Residual: {:.3e} (O(1) target)       ║", r_final_nd_norm);
+        println!("  ║  Physical residual: {:.3e} N                              ║",
+                 r_final_phys.iter().map(|&x| x * x).sum::<f64>().sqrt());
+        println!("  ╚════════════════════════════════════════════════════════════╝\n");
+    }
+
+    // Update the original guess for next iteration
+    u_guess_phys.copy_from_slice(&u_sol_phys);
+
+    (u_sol_phys, stats)
 }

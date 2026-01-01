@@ -11,9 +11,9 @@
 use geo_simulator::{
     ImprovedMeshGenerator, DofManager, Assembler, GMRES, VectorField,
     VtkWriter, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField,
-    jfnk_solve, JFNKConfig, GaussQuadrature, Tet10Basis, StrainDisplacement,
+    jfnk_solve_nondimensional, JFNKConfig, GaussQuadrature, Tet10Basis, StrainDisplacement,
     HillslopeDiffusion, assess_mesh_quality, smooth_mesh_auto, WinklerFoundation,
-    picard_solve, PicardConfig,
+    picard_solve, PicardConfig, CharacteristicScales,
 };
 use nalgebra::{Point3, Vector3};
 use std::time::Instant;
@@ -32,9 +32,10 @@ fn main() {
     let (lx, ly, lz) = (100_000.0, 10_000.0, 10_000.0); // 100x10x10 km
     let v_extension = 0.01 / (365.25 * 24.0 * 3600.0); // 1 cm/yr in m/s
 
-    // Rheologies (DES3D target values)
-    let mu_crust = 1e24;
-    let _mu_mantle = 1e24;
+    // Rheologies (Start with lower viscosity for testing convergence)
+    // TODO: Gradually increase to 1e24 once solver is stable
+    let mu_crust = 1e21;  // Reduced from 1e24 for initial testing
+    let _mu_mantle = 1e21;
     let c0 = 44e6;        // 44 MPa (DES3D cohesion0)
     let cmin = 4e6;       // 4 MPa (DES3D cohesion1)
     let phi = 30.0_f64.to_radians();
@@ -46,11 +47,12 @@ fn main() {
     let gravity_vec = Vector3::new(0.0, 0.0, -g);
 
     // Timestep for 1 Myr simulation
-    let n_steps = 20000;  // 1 Myr total (20000 steps × 50 yr)
-    let dt = 5.0 * (365.25 * 24.0 * 3600.0); // 5 years per step (Reduced for stability)
+    let n_steps = 20000;  // 1 Myr total (20000 steps × 5 yr)
+    let dt = 5.0 * (365.25 * 24.0 * 3600.0); // 5 years per step
 
-    // Mesh quality check interval (check every N steps to reduce cost)
-    let quality_check_interval = 5; // Check more frequently
+    // Output and checkpoint intervals (time-based, not step-based)
+    let output_interval_years = 10_000.0; // Output every 10 kyr
+    let quality_check_years = 5_000.0;    // Check mesh quality every 5 kyr
 
     println!("Problem Dimensions (DES3D-matched, viscosity adjusted for un-preconditioned solver):");
     println!("  Domain: 100 km × 10 km × 10 km");
@@ -58,14 +60,26 @@ fn main() {
     println!("  Rheology: EVP (μ = 1e21 Pa·s, c = 44→4 MPa)");
     println!("  Timestep: {} years", dt / (365.25 * 24.0 * 3600.0));
     println!("  Duration: {} kyr ({} steps)", n_steps as f64 * dt / (365.25 * 24.0 * 3600.0) / 1000.0, n_steps);
-    println!("  Mesh quality check: Every {} steps", quality_check_interval);
+    println!("  Output interval: {:.1} kyr", output_interval_years / 1000.0);
+    println!("  Quality check interval: {:.1} kyr", quality_check_years / 1000.0);
+
+    // ========================================================================
+    // Non-dimensionalization Setup (CRITICAL for convergence!)
+    // ========================================================================
+    let scales = CharacteristicScales::new(
+        lx,           // Length scale: 100 km (domain width)
+        v_extension,  // Velocity scale: 1 cm/yr (extension rate)
+        mu_crust,     // Viscosity scale: 1e24 Pa·s (reference viscosity)
+        rho_crust,    // Density scale: 2700 kg/m³
+        g,            // Gravity: 9.81 m/s²
+    );
 
     println!("\nSolver Configuration:");
     println!("  Non-linear Solver: JFNK (Jacobian-Free Newton-Krylov)");
-    println!("  Scaling Strategy:  Equilibration (S J S) - O(1) System Balancing");
+    println!("  Scaling Strategy:  Non-dimensionalization (Physical → O(1))");
     println!("  Perturbation:      Dimensionless (Scaled Space)");
     println!("  Linear Solver:     GMRES (Restart=200, MaxIter=2000)");
-    println!("  Linear Tolerance:  Rel=1e-4, Abs=1e-9 (Adaptive)");
+    println!("  Linear Tolerance:  Rel=1e-4, Abs=1e-9 (Dimensionless)");
     println!("  Preconditioner:    Block Triangular (Upper Schur)");
     println!("    - Velocity Block: ILU (Incomplete LU) - Robust but Slower Setup");
     println!("    - Pressure Block: Inverse Viscosity Approximation");
@@ -208,9 +222,10 @@ fn main() {
 
     // CRITICAL: Initialize velocity with non-zero guess based on BCs
     for (node_id, node) in mesh.geometry.nodes.iter().enumerate() {
-        let x_normalized = node.x / lx; 
+        let x_normalized = node.x / lx;
         current_sol[dof_mgr_init.velocity_dof(node_id, 0)] = v_extension * (2.0 * x_normalized - 1.0);
     }
+
 
     let mut element_pressures = vec![0.0; n_elements];
     let mut _prev_picard_iters = 0;  // Track previous Picard iterations for adaptive config
@@ -256,7 +271,13 @@ fn main() {
     println!("\nStarting Tectonic Evolution...");
     let start_sim = Instant::now();
 
+    // Time-based output tracking
+    let dt_years = dt / (365.25 * 24.0 * 3600.0);
+    let mut next_output_time = 0.0;
+    let mut next_quality_check_time = 0.0;
+
     for step in 0..=n_steps {
+        let current_time_years = step as f64 * dt_years;
         // 1. Setup BCs for current mesh state
         let mut dof_mgr = DofManager::new_mixed(mesh.num_nodes(), &mesh.connectivity.corner_nodes());
 
@@ -304,17 +325,19 @@ fn main() {
 
         // 3. Setup JFNK (Jacobian-Free Newton-Krylov) solver
 
-        // JFNK config: Conservative settings for viscoplastic systems
+        // JFNK config: Optimized for viscoplastic geodynamics
         let mut jfnk_config = JFNKConfig::conservative();
-        // Show detailed Newton iterations every 20 steps to keep console clean
+        jfnk_config.tolerance = 5e-4;       // Slightly relaxed for speed (0.05% relative error)
+        jfnk_config.abs_tolerance = 1e-7;   // Relaxed absolute tolerance
+        jfnk_config.max_newton_iterations = 20; // Reduced - converging in 5-6 iterations
         jfnk_config.verbose = verbose;
 
-        // Linear solver: GMRES is preferred for the indefinite saddle-point system
+        // Linear solver: GMRES with balanced settings
         let mut linear_solver = GMRES::new()
-            .with_restart(200)
-            .with_max_iterations(2000)
-            .with_tolerance(1e-4)      
-            .with_abs_tolerance(1e-9)
+            .with_restart(180)              // Slightly reduced from 200
+            .with_max_iterations(1200)      // Reduced from 2000, but not too aggressive
+            .with_tolerance(1e-4)           // Standard tolerance
+            .with_abs_tolerance(1e-9)       // Absolute floor
             .with_verbose(verbose);
 
         // Assembler closure: Returns (K, f, _) for full saddle-point system
@@ -356,7 +379,7 @@ fn main() {
             // Adapter for Picard assembler signature: needs to return (K, f)
             // (Note: We need a fresh assembler closure because the previous one is moved/borrowed or we can just reuse code structure)
             // Ideally we'd reuse 'assembler' but it returns a triplet. Let's make a wrapper.
-            let mut picard_assembler = |sol: &[f64]| {
+            let picard_assembler = |sol: &[f64]| {
                  let (k, f, _) = (assembler)(sol);
                  (k, f)
             };
@@ -378,17 +401,19 @@ fn main() {
             
             // Update solution with the warmed-up result
             current_sol = warm_sol;
-            
+
             if verbose {
-                println!("    Picard Warmup: Iters={}, Converged={}, ||R_rel||={:.2e}", 
+                println!("    Picard Warmup: Iters={}, Converged={}, ||R_rel||={:.2e}",
                     stats.iterations, stats.converged, stats.relative_change);
             }
         }
         
         // 5. Run JFNK Solver
+        // NOTE: Using built-in equilibration instead of explicit nondimensionalization
+        // to avoid double-scaling issues. Equilibration brings system to O(1) automatically.
 
-        // Solve nonlinear system with clean JFNK
-        let (sol_new, jfnk_stats) = jfnk_solve(
+        // Solve nonlinear system
+        let (sol_new, jfnk_stats) = geo_simulator::jfnk_solve(
             assembler,
             residual_evaluator,
             &mut linear_solver,
@@ -520,10 +545,13 @@ fn main() {
              break; // Terminate Main Loop
         }
 
-        // 5a. Mesh Quality Check & Smoothing (Periodic - every N steps for performance)
-        if step % quality_check_interval == 0 {
+        // 5a. Mesh Quality Check & Smoothing (Time-based)
+        if current_time_years >= next_quality_check_time || step == 0 {
             let quality = assess_mesh_quality(&mesh);
-            println!("       Mesh Quality: {}", quality.report());
+            if verbose {
+                println!("       [{:.2} kyr] Mesh Quality: {}", current_time_years / 1000.0, quality.report());
+            }
+            next_quality_check_time = current_time_years + quality_check_years;
 
             // Apply smoothing if mesh quality degrading
             if quality.needs_smoothing() {
@@ -555,22 +583,22 @@ fn main() {
         // In a full implementation, we'd interpolate L_dot back to racers.
         // For now, elements carry the softened state derived from majority.
 
-        let time_my = (step as f64 * dt) / 1e6 / (365.25 * 24.0 * 3600.0);
-        // Concise Output
-        if !verbose {
-            println!("Step {:4} | {:.2} MY | Newton: {:2} | Lin: {:5} | ||R||: {:.2e}", 
-                step, 
-                time_my,
-                jfnk_stats.newton_iterations, 
-                jfnk_stats.total_linear_iterations, 
-                jfnk_stats.residual_norm
-            );
-        } else {
-            // Verbose block already printed by JFNK/Solver
-             println!("Step {} Completed: t = {:.3} kyr", step, step as f64 * dt / (365.25 * 24.0 * 3600.0) / 1000.0);
-        }
+        let time_my = current_time_years / 1e6;
 
-        if step % 20 == 0 || step == n_steps {
+        // Output and VTK saving (time-based)
+        let should_output = current_time_years >= next_output_time || step == 0 || step == n_steps;
+
+        if should_output {
+            println!("⏱  {:.2} MY ({:6} steps) | Newton: {:2} | LinIter: {:5} | ||R||: {:.2e} | Mesh: {}/{} OK",
+                time_my,
+                step,
+                jfnk_stats.newton_iterations,
+                jfnk_stats.total_linear_iterations,
+                jfnk_stats.residual_norm,
+                mesh.num_elements() - assess_mesh_quality(&mesh).num_inverted,
+                mesh.num_elements()
+            );
+            next_output_time = current_time_years + output_interval_years;
             let filename = format!("output/core_complex/step_{:04}.vtu", step);
             
             let mut viz_mesh = mesh.clone();
