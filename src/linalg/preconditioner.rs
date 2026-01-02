@@ -15,6 +15,13 @@ pub trait Preconditioner {
     fn apply(&self, r: &[f64]) -> Vec<f64>;
 }
 
+impl Preconditioner for Box<dyn Preconditioner> {
+    fn apply(&self, r: &[f64]) -> Vec<f64> {
+        self.as_ref().apply(r)
+    }
+}
+
+
 /// Jacobi (diagonal) preconditioner
 ///
 /// M = diag(A)
@@ -277,6 +284,50 @@ mod tests {
 
         let result = ILUPreconditioner::new(&A);
         assert!(result.is_err());
+    }
+}
+
+/// Block Diagonal Preconditioner for Saddle-Point systems
+///
+/// M = [ A  0 ]
+///     [ 0  S ]
+///
+/// Simpler and more robust than block triangular
+pub struct BlockDiagonalPreconditioner<PA: Preconditioner, PS: Preconditioner> {
+    pub a_precond: PA,
+    pub s_precond: PS,
+    pub num_vel_dofs: usize,
+}
+
+impl<PA: Preconditioner, PS: Preconditioner> BlockDiagonalPreconditioner<PA, PS> {
+    pub fn new(a_precond: PA, s_precond: PS, num_vel_dofs: usize) -> Self {
+        Self {
+            a_precond,
+            s_precond,
+            num_vel_dofs,
+        }
+    }
+}
+
+impl<PA: Preconditioner, PS: Preconditioner> Preconditioner for BlockDiagonalPreconditioner<PA, PS> {
+    fn apply(&self, r: &[f64]) -> Vec<f64> {
+        let nv = self.num_vel_dofs;
+        let n = r.len();
+
+        // Split residual: [r_u, r_p]
+        let r_u = &r[0..nv];
+        let r_p = &r[nv..n];
+
+        // Apply block preconditioners independently
+        let z_u = self.a_precond.apply(r_u);
+        let z_p = self.s_precond.apply(r_p);
+
+        // Concatenate: [z_u, z_p]
+        let mut z = vec![0.0; n];
+        z[0..nv].copy_from_slice(&z_u);
+        z[nv..n].copy_from_slice(&z_p);
+
+        z
     }
 }
 

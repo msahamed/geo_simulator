@@ -131,25 +131,28 @@ pub struct PicardStats {
 ///     (K, f)
 /// };
 ///
-/// // Solve nonlinear system
+///// Solve nonlinear system
 /// let (v_solution, stats) = picard_solve(
 ///     assembler,
 ///     &mut linear_solver,
 ///     &mut velocity,
 ///     &dof_mgr,
 ///     &config,
+///     None::<fn(&CsMat<f64>) -> Box<dyn crate::linalg::preconditioner::Preconditioner>>,
 /// );
 /// ```
-pub fn picard_solve<F, S>(
+pub fn picard_solve<F, S, P>(
     mut assembler: F,
     linear_solver: &mut S,
     velocity_guess: &mut [f64],
     dof_mgr: &crate::fem::DofManager,
     config: &PicardConfig,
+    mut preconditioner_factory: Option<P>,
 ) -> (Vec<f64>, PicardStats)
 where
     F: FnMut(&[f64]) -> (CsMat<f64>, Vec<f64>),
     S: Solver,
+    P: FnMut(&CsMat<f64>) -> Box<dyn crate::linalg::preconditioner::Preconditioner>,
 {
     let n_dofs = velocity_guess.len();
     let mut velocity_prev = velocity_guess.to_vec();
@@ -164,7 +167,13 @@ where
         let (k_bc, f_bc) = crate::fem::Assembler::apply_dirichlet_bcs(&k_mat, &f, dof_mgr);
 
         // 3. Solve linear system
-        let (velocity_new, lin_stats) = linear_solver.solve(&k_bc, &f_bc);
+        let (velocity_new, lin_stats) = if let Some(factory) = &mut preconditioner_factory {
+            let precond = factory(&k_bc);
+            // Pass reference to Box, so P = Box<dyn Preconditioner> (which is Sized)
+            linear_solver.solve_with_operator(&k_bc, &f_bc, &precond)
+        } else {
+            linear_solver.solve(&k_bc, &f_bc)
+        };
         total_linear_iters += lin_stats.iterations;
         last_linear_stats = lin_stats;
 
@@ -307,7 +316,14 @@ mod tests {
         let mut config = PicardConfig::default();
         config.relaxation = 1.0; // For linear problem, should converge in 1 iteration
 
-        let (_v, stats) = picard_solve(assembler, &mut linear_solver, &mut velocity, &dof_mgr, &config);
+        let (_v, stats) = picard_solve(
+            assembler, 
+            &mut linear_solver, 
+            &mut velocity, 
+            &dof_mgr, 
+            &config,
+            None::<fn(&CsMat<f64>) -> Box<dyn crate::linalg::preconditioner::Preconditioner>>
+        );
 
         // Linear problem with relaxation 1.0 → should converge in 2 iterations
         // (1st to get close, 2nd to confirm Δu < tol)

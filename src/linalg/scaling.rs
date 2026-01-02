@@ -205,8 +205,116 @@ impl CharacteristicScales {
     }
 
     // ========================================================================
-    // Solution Vector Scaling (for JFNK solver)
+    // Matrix Scaling (for JFNK solver)
     // ========================================================================
+
+    /// Non-dimensionalize stiffness matrix
+    ///
+    /// Multiplies matrix entries by scaling factors to make the system O(1).
+    ///
+    /// Matrix structure:
+    /// [ A_vv  A_vp ]
+    /// [ A_pv  A_pp ]
+    ///
+    /// Equations:
+    /// 1. Momentum: F = F* F̂
+    /// 2. Continuity: ∇·v = (v*/L*) ∇̂·v̂
+    ///
+    /// Scaling Factors:
+    /// - A_vv (Force/Velocity): Scale by v*/F*
+    /// - A_vp (Force/Pressure): Scale by τ*/F*
+    /// - A_pv (Rate/Velocity):  Scale by v*/(v*/L*) = L*
+    /// - A_pp (Rate/Pressure):  Scale by τ*/(v*/L*) = τ*L*/v*
+    pub fn nondim_matrix(&self, k_phys: &sprs::CsMat<f64>, dof_mgr: &DofManager) -> sprs::CsMat<f64> {
+        let mut k_nd = k_phys.clone();
+        let nv = dof_mgr.total_vel_dofs();
+
+        // Precompute scaling factors
+        // Row 1 (Momentum): Divide by F* = τ*L*²
+        let scale_vv = self.velocity / self.force;   // F/F* / (v/v*) = v*/F*
+        let scale_vp = self.stress / self.force;     // F/F* / (p/τ*) = τ*/F*
+
+        // Row 2 (Continuity): Divide by Φ* = L*² v* (Volume Flux)
+        // A_pv * v -> Flux [L^3/T].
+        // We want (A_pv * v) / (L*² v*)
+        // A_pv * v_phys = A_pv * (v_nd * v*)
+        // (A_pv * v_nd * v*) / (L*² v*) = v_nd * (A_pv / L*²)
+        // So scale A_pv by 1/L*²
+        let scale_pv = 1.0 / (self.length * self.length);
+
+        // A_pp terms (stabilization):
+        // (A_pp * p_phys) / (L*² v*) 
+        // p_phys = p_nd * τ*
+        // A_pp * p_nd * τ* / (L*² v*) = p_nd * (A_pp * τ* / (L*² v*))
+        let scale_pp = self.stress / (self.length * self.length * self.velocity);
+
+        // Iterate and scale
+        // Consume the matrix to get owned raw storage, preventing simultaneous borrow issues
+        let (rows, cols) = k_nd.shape();
+        let (indptr, indices, mut data) = k_nd.into_raw_storage();
+        
+        for row_idx in 0..rows {
+            let row_start = indptr[row_idx];
+            let row_end = indptr[row_idx + 1];
+
+            // Determine row type (Momentum vs Continuity)
+            let is_momentum_row = row_idx < nv;
+
+            for idx in row_start..row_end {
+                let col_idx = indices[idx];
+                let is_momentum_col = col_idx < nv;
+
+                let factor = if is_momentum_row {
+                    if is_momentum_col { scale_vv } else { scale_vp }
+                } else {
+                    if is_momentum_col { scale_pv } else { scale_pp }
+                };
+
+                data[idx] *= factor;
+            }
+        }
+        
+        // Reconstruct the matrix (structure is unchanged, only data modified)
+        // Since we started with a valid CSR matrix, these vectors are valid.
+        sprs::CsMat::new((rows, cols), indptr, indices, data)
+    }
+
+    /// Dimensionalize matrix (Dimensionless → Physical)
+    /// Used if we need to recover physical stiffness for some reason.
+    pub fn dim_matrix(&self, k_nd: &sprs::CsMat<f64>, dof_mgr: &DofManager) -> sprs::CsMat<f64> {
+        let mut k_phys = k_nd.clone();
+         let nv = dof_mgr.total_vel_dofs();
+         
+         // Inverse factors
+         let scale_vv = self.force / self.velocity;
+         let scale_vp = self.force / self.stress;
+         let scale_pv = self.length * self.length;
+         let scale_pp = (self.length * self.length * self.velocity) / self.stress;
+
+        let (rows, cols) = k_phys.shape();
+        let (indptr, indices, mut data) = k_phys.into_raw_storage();
+
+        for row_idx in 0..rows {
+            let row_start = indptr[row_idx];
+            let row_end = indptr[row_idx+1];
+            let is_momentum_row = row_idx < nv;
+
+            for idx in row_start..row_end {
+                let col_idx = indices[idx];
+                let is_momentum_col = col_idx < nv;
+
+                let factor = if is_momentum_row {
+                    if is_momentum_col { scale_vv } else { scale_vp }
+                } else {
+                     if is_momentum_col { scale_pv } else { scale_pp }
+                };
+                data[idx] *= factor;
+            }
+        }
+        
+        sprs::CsMat::new((rows, cols), indptr, indices, data)
+    }
+
 
     /// Non-dimensionalize solution vector [v_x, v_y, v_z, ..., p_1, p_2, ...]
     ///
@@ -250,7 +358,8 @@ impl CharacteristicScales {
 
     /// Non-dimensionalize residual vector (force residual)
     ///
-    /// Same scaling as solution derivative: [F/F*, F/F*, ..., p/τ*, p/τ*, ...]
+    /// Momentum residuals: [F/F*, F/F*, ...]
+    /// Continuity residuals: [Φ/Φ*, ...] where Φ is volume flux
     pub fn nondim_residual(&self, res_phys: &[f64], dof_mgr: &DofManager) -> Vec<f64> {
         let n = res_phys.len();
         let mut res_nondim = vec![0.0; n];
@@ -261,10 +370,13 @@ impl CharacteristicScales {
             res_nondim[i] = self.nondim_force(res_phys[i]);
         }
 
-        // Scale continuity residuals (dimensionless already, but apply strain rate scaling)
-        // ∇·v has units of 1/s, so scale by ė* = v*/L*
+        // Scale continuity residuals (volume flux)
+        // The FEM pressure residual R_p = ∫ N_i * (∇·v) dV has units [m³/s]
+        // Characteristic volume flux: Φ* = L*² * v*
+        // This ensures dimensionless residuals are O(1)
+        let volume_flux_scale = self.length * self.length * self.velocity;
         for i in nv..n {
-            res_nondim[i] = res_phys[i] / self.strain_rate;
+            res_nondim[i] = res_phys[i] / volume_flux_scale;
         }
 
         res_nondim

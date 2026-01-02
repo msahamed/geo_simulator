@@ -190,7 +190,7 @@ impl Assembler {
             }
         }
     }
-    let char_diag = 1.0;
+    let char_diag = max_diag;
 
     let mut f_new = f.to_vec();
 
@@ -610,11 +610,21 @@ impl Assembler {
             }
         }
 
-        // Apply Dirichlet BCs
-        // Using 1.0 scaling here is consistent with JFNK automated scaling
+        // Apply Dirichlet BCs with proper scaling
+        // CRITICAL: Scale Dirichlet residuals to match PDE residual units
+        // Velocity BCs: (u - u_prescribed) needs to be scaled like a force
+        // We use a characteristic stiffness to convert velocity difference to force
+        // char_stiffness ~ max_diagonal ~ 1e25 N·s/m for viscous problems
+        // So: R_dirichlet = char_stiffness * (u - u_prescribed) ~ 1e25 * 1e-10 ~ 1e15 N
+
+        // Estimate characteristic diagonal from typical viscous stiffness
+        // For a viscous element: K_diag ~ μ * Volume / L² ~ 1e21 * 1e9 / 1e8 ~ 1e22
+        let char_stiffness = 1e22; // Typical viscous stiffness (N·s/m)
+
         for i in 0..n_dofs {
             if dof_mgr.is_dirichlet(i) {
-                global_residual[i] = current_sol[i] - dof_mgr.get_dirichlet_value(i);
+                let bc_error = current_sol[i] - dof_mgr.get_dirichlet_value(i);
+                global_residual[i] = char_stiffness * bc_error;
             }
         }
 
@@ -822,11 +832,63 @@ impl Assembler {
         let strains = (0..n_elems).map(|id| {
             mesh.plasticity_state.as_ref().map_or(0.0, |ps| ps.get(id))
         }).collect::<Vec<_>>();
-        
+
         let (k, _, _) = Self::assemble_stokes_vep_multimaterial_parallel(
             mesh, dof_mgr, &[material.clone()], &mat_ids, current_sol, &strains
         );
         k
+    }
+
+    /// Assemble pressure mass matrix for Schur complement preconditioning
+    ///
+    /// M_p[i,j] = ∫ N_i(x) N_j(x) dV
+    ///
+    /// Used in geodynamic Stokes preconditioners: S ≈ (1/μ) M_p
+    ///
+    /// Only pressure DOFs (corner nodes in P1-P2 mixed elements)
+    pub fn assemble_pressure_mass_matrix(
+        mesh: &Mesh,
+        dof_mgr: &DofManager,
+    ) -> CsMat<f64> {
+        let num_pressure_dofs = dof_mgr.total_dofs() - dof_mgr.total_vel_dofs();
+
+        // Parallel element computation
+        let element_matrices: Vec<_> = mesh
+            .connectivity
+            .tet10_elements
+            .par_iter()
+            .map(|elem| {
+                let mut nodes = [Point3::origin(); 10];
+                for i in 0..10 {
+                    nodes[i] = mesh.geometry.nodes[elem.nodes[i]];
+                }
+
+                // Compute 4x4 mass matrix for pressure (P1 on corners)
+                crate::mechanics::ElasticityElement::pressure_mass_matrix(&nodes)
+            })
+            .collect();
+
+        // Sequential assembly
+        let mut triplets = TriMat::new((num_pressure_dofs, num_pressure_dofs));
+
+        for (elem_idx, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let m_elem = &element_matrices[elem_idx];
+
+            // Assemble pressure mass (only corners have pressure DOFs)
+            for i in 0..4 {
+                if let Some(gi) = dof_mgr.pressure_dof(elem.nodes[i]) {
+                    let local_i = gi - dof_mgr.total_vel_dofs();
+                    for j in 0..4 {
+                        if let Some(gj) = dof_mgr.pressure_dof(elem.nodes[j]) {
+                            let local_j = gj - dof_mgr.total_vel_dofs();
+                            triplets.add_triplet(local_i, local_j, m_elem[(i, j)]);
+                        }
+                    }
+                }
+            }
+        }
+
+        triplets.to_csr()
     }
 
     /// Assemble global body force vector for gravity

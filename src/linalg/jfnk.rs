@@ -19,7 +19,7 @@
 
 use sprs::CsMat;
 use crate::linalg::solver::{Solver, SolverStats};
-use crate::linalg::preconditioner::{ILUPreconditioner, Preconditioner};
+use crate::linalg::preconditioner::{Preconditioner, ILUPreconditioner};
 use crate::linalg::scaling::CharacteristicScales;
 
 /// JFNK configuration
@@ -40,7 +40,14 @@ pub struct JFNKConfig {
     pub line_search_rho: f64,    // Reduction factor
 
     /// Verbose output
+    /// Verbose output
     pub verbose: bool,
+
+    /// Use AMG preconditioner for velocity block
+    pub use_amg: bool,
+    
+    /// AMG strength threshold (0.25 default, lower for difficult problems)
+    pub amg_strength_threshold: f64,
 }
 
 impl Default for JFNKConfig {
@@ -53,9 +60,12 @@ impl Default for JFNKConfig {
             line_search_alpha: 1.0,    // Try full Newton step first
             line_search_rho: 0.5,      // Halve step on failure
             verbose: false,
+            use_amg: false,
+            amg_strength_threshold: 0.25,
         }
     }
 }
+
 
 impl JFNKConfig {
     /// Conservative config for difficult viscoplastic problems
@@ -68,6 +78,8 @@ impl JFNKConfig {
             line_search_alpha: 1.0,        // Try full Newton step first
             line_search_rho: 0.5,
             verbose: true,
+            use_amg: false,
+            amg_strength_threshold: 0.25,
         }
     }
 }
@@ -245,96 +257,99 @@ where
         let (K_bc, _) = crate::fem::Assembler::apply_dirichlet_bcs(&K, &_f, dof_mgr);
         if config.verbose { println!("    JFNK: Assembly took {:?}", timer.elapsed()); }
 
-        // 2. Setup Block Preconditioner
-        // Extract blocks from K_bc
-        // A is the [0..nv, 0..nv] part
-        // B is the [nv..n, 0..nv] part
+        // 2. Setup Block Diagonal Preconditioner with AMG for Velocity Block
+        // Extract velocity block (cannot use AMG on full system due to zero pressure diagonal)
         let mut A_triplets = sprs::TriMat::new((nv, nv));
-        let mut B_triplets = sprs::TriMat::new((n - nv, nv));
-        
         for (row_idx, row) in K_bc.outer_iterator().enumerate() {
-            for (col_idx, &val) in row.iter() {
-                if row_idx < nv && col_idx < nv {
-                    A_triplets.add_triplet(row_idx, col_idx, val);
-                } else if row_idx >= nv && col_idx < nv {
-                    B_triplets.add_triplet(row_idx - nv, col_idx, val);
+            if row_idx < nv {
+                for (col_idx, &val) in row.iter() {
+                    if col_idx < nv {
+                        A_triplets.add_triplet(row_idx, col_idx, val);
+                    }
                 }
             }
         }
         let A_block = A_triplets.to_csr();
-        let B_block = B_triplets.to_csr();
 
-        // Preconditioners for blocks
-        let a_precond = ILUPreconditioner::new(&A_block).unwrap();
-        
-        // Schur complement approximation: S \approx B * diag(A)^-1 * B^T
-        let mut a_diag = vec![1.0; nv];
+        if config.verbose {
+            println!("    AMG: Building preconditioner for velocity block ({} x {})", A_block.rows(), A_block.cols());
+            println!("    AMG: A_block has {} non-zeros", A_block.nnz());
+
+            // Verify dimensions match
+            if A_block.rows() != nv || A_block.cols() != nv {
+                eprintln!("WARNING: A_block dimensions {}x{} != expected {}x{}",
+                    A_block.rows(), A_block.cols(), nv, nv);
+            }
+        }
+
+        // Velocity block preconditioner: AMG (optimal for elliptic operators) or ILU(0)
+        let a_precond: Box<dyn Preconditioner> = if config.use_amg {
+            if config.verbose { println!("    AMG: Building preconditioner for velocity block ({} x {})", A_block.rows(), A_block.cols()); }
+            let amg = crate::linalg::amg::AMGPreconditioner::new(
+                &A_block,
+                10,    // max_levels
+                100,   // coarse_size
+                config.amg_strength_threshold,  // strength_threshold
+            ).expect("AMG setup failed");
+            if config.verbose { println!("    AMG built successfully"); }
+            Box::new(amg)
+        } else {
+             if config.verbose { println!("    ILU: Building preconditioner for velocity block"); }
+             let ilu = ILUPreconditioner::new(&A_block).unwrap();
+             Box::new(ilu)
+        };
+
+
+        // Pressure block preconditioner: Scaled identity (geodynamic Schur approximation)
+        // S ≈ (1/μ) * M_p ≈ (1/μ) * I for dimensionless system
+        let mut a_diag_sum = 0.0;
+        let mut a_diag_count = 0;
         for i in 0..nv {
             if let Some(&val) = K_bc.get(i, i) {
-                if val.abs() > 1e-18 { a_diag[i] = val; }
+                if val.abs() > 1e-18 {
+                    a_diag_sum += val.abs();
+                    a_diag_count += 1;
+                }
             }
         }
-        
-        let mut s_diag = vec![0.0; n - nv];
-        for (row_idx, row) in B_block.outer_iterator().enumerate() {
-            let mut row_sum = 0.0;
-            for (col_idx, &val) in row.iter() {
-                row_sum += val * val / a_diag[col_idx];
-            }
-            s_diag[row_idx] = row_sum;
-        }
-        for val in s_diag.iter_mut() {
-            if val.abs() < 1e-18 { *val = 1.0; }
-        }
-        
-        // Form a diagonal matrix for Jacobi
+        let mu_char = if a_diag_count > 0 { a_diag_sum / a_diag_count as f64 } else { 1.0 };
+
+        // Pressure mass matrix approximation
         let mut s_mat_tri = sprs::TriMat::new((n - nv, n - nv));
-        for (i, &val) in s_diag.iter().enumerate() {
-            s_mat_tri.add_triplet(i, i, val);
+        for i in 0..(n-nv) {
+            s_mat_tri.add_triplet(i, i, mu_char);
         }
         let s_mat = s_mat_tri.to_csr();
         let s_precond = crate::linalg::preconditioner::JacobiPreconditioner::new(&s_mat);
-        
-        let block_precond = crate::linalg::preconditioner::BlockTriangularPreconditioner::new(
+
+        // Combine into block diagonal preconditioner
+        let block_diag_precond = crate::linalg::preconditioner::BlockDiagonalPreconditioner::new(
             a_precond,
             s_precond,
-            B_block,
             nv
         );
 
-        // 3. Automated Block Scaling
-        // Calculate representative diagonal values for V and P
-        let mut v_diag_sum = 0.0;
-        let mut v_diag_count = 0;
-        for i in 0..nv {
-            if let Some(&val) = K_bc.get(i, i) {
-                v_diag_sum += val.abs();
-                v_diag_count += 1;
-            }
-        }
-        let avg_v_diag = if v_diag_count > 0 { v_diag_sum / v_diag_count as f64 } else { 1.0 };
-        
-        let mut p_diag_sum = 0.0;
-        let mut p_diag_count = 0;
-        for &val in &s_diag {
-            p_diag_sum += val.abs();
-            p_diag_count += 1;
-        }
-        let avg_p_diag = if p_diag_count > 0 { p_diag_sum / p_diag_count as f64 } else { 1.0 };
+        // 3. Diagonal Equilibration Scaling
+        // With non-dimensionalization, system is already O(1), but we still apply
+        // diagonal equilibration to ensure uniform scaling across DOFs
+        // Scaling: S = Diag(1/sqrt(|D_ii|))
 
-        // True Diagonal Balancing (Equilibration): Scaled Matrix = S J S
-        // Where S = Diag(1/sqrt(D_ii))
-        let s_v = 1.0 / avg_v_diag.sqrt().max(1e-15);
-        let s_p = 1.0 / avg_p_diag.sqrt().max(1e-15);
-
-        let mut s_diag = vec![1.0; n];
+        let s_diag = vec![1.0; n];
+        /* 
         for i in 0..n {
-            if dof_mgr.is_dirichlet(i) {
-                s_diag[i] = 1.0; 
+            let is_pressure = i >= nv;
+            if dof_mgr.is_dirichlet(i) || is_pressure {
+                s_diag[i] = 1.0;  // Don't scale Dirichlet DOFs or Pressure DOFs (stabilization is tiny)
             } else {
-                s_diag[i] = if i < nv { s_v } else { s_p };
+                if let Some(&val) = K_bc.get(i, i) {
+                    let abs_val = val.abs();
+                    if abs_val > 1e-15 {
+                        s_diag[i] = 1.0 / abs_val.sqrt();
+                    }
+                }
             }
         }
+        */
 
         // 4. Solve Scaled Linear System: (S J S) du_hat = -S R
         let mut rhs_scaled = vec![0.0; n];
@@ -364,7 +379,7 @@ where
         };
 
         let scaled_precond = ScaledPreconditioner {
-            inner: &block_precond,
+            inner: &block_diag_precond,
             s_row: s_diag.clone(),
             s_col: s_diag.clone(),
         };
@@ -503,7 +518,21 @@ where
         let (K_phys, f_phys, energy) = assembler(&u_phys);
 
         // Return physical matrix and RHS (JFNK internal scaling handles the rest)
-        (K_phys, f_phys, energy)
+        // Return physical matrix and RHS (JFNK internal scaling handles the rest)
+        // CRITICAL FIX: We MUST scale the matrix K to dimensionless units for the preconditioner to work!
+        // The original implementation passed K_phys but solved for u_nd, which meant the preconditioner M ≈ K_phys
+        // was wildly out of scale with the O(1) operator JFNK constructs.
+        
+        let k_nd = scales.nondim_matrix(&K_phys, dof_mgr);
+        let f_nd = scales.nondim_residual(&f_phys, dof_mgr); // Also scale RHS "energy" logic if needed, but f is not really used by JFNK except for initial residual? 
+        // JFNK calls assembler(&u) -> (K, f). Then applies BCs. 
+        // Then builds preconditioner M from K.
+        // Then effectively linear system is J*du = -R.
+        // J uses finite difference of R.
+        // So J is O(1) if R is O(1).
+        // So M must be O(1) to be a good preconditioner.
+        
+        (k_nd, f_nd, energy)
     };
 
     // 3. Wrap residual evaluator: dimensionless input → dimensionless output
