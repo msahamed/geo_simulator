@@ -27,7 +27,7 @@ struct AMGLevel {
 pub struct AMGPreconditioner {
     levels: Vec<AMGLevel>,
     num_smoothing_steps: usize,
-    strength_threshold: f64,
+    _strength_threshold: f64,
 }
 
 impl AMGPreconditioner {
@@ -124,7 +124,7 @@ impl AMGPreconditioner {
         Ok(Self {
             levels,
             num_smoothing_steps: 2,
-            strength_threshold,
+            _strength_threshold: strength_threshold,
         })
     }
 

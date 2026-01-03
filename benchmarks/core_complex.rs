@@ -1,20 +1,13 @@
 /// Benchmark: 3D Core Complex Formation
 ///
-/// **Goal:** Simulate crustal extension, strain localization, and mantle upwelling.
-///
-/// **Setup:**
-/// - Domain: 100km x 100km x 30km
-/// - Layers: 20km Crust (Mat 0), 10km Mantle (Mat 1)
-/// - BCs: Extension at 1 cm/yr (v_x = +V at x=L, v_x = -V at x=0)
-/// - Physics: Multi-material Visco-Elasto-Plastic (VEP) with tracer tracking.
-
 use geo_simulator::{
     ImprovedMeshGenerator, DofManager, Assembler, GMRES, VectorField,
-    VtkWriter, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField,
-    jfnk_solve_nondimensional, JFNKConfig, GaussQuadrature, Tet10Basis, StrainDisplacement,
+    VtkWriter, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField, JFNKConfig, GaussQuadrature, Tet10Basis, StrainDisplacement,
     HillslopeDiffusion, assess_mesh_quality, smooth_mesh_auto, WinklerFoundation,
     picard_solve, PicardConfig, CharacteristicScales,
+    SimulationConfig,
 };
+use geo_simulator::ic_bc::{setup_boundary_conditions, setup_initial_tracers, get_material_properties};
 use nalgebra::{Point3, Vector3};
 use std::time::Instant;
 use rayon::prelude::*;
@@ -25,48 +18,53 @@ fn main() {
     println!("═══════════════════════════════════════════════════════════════\n");
 
     // ========================================================================
-    // 1. Problem Parameters (SI Units: meters, kg, seconds, Pascals)
+    // 1. Load Configuration from TOML
     // ========================================================================
-    // DES3D-matched configuration
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() > 1 {
+        &args[1]
+    } else {
+        "inputs/core_complex_2d/config.toml"
+    };
 
-    let (lx, ly, lz) = (100_000.0, 10_000.0, 10_000.0); // 100x10x10 km
-    let v_extension = 0.01 / (365.25 * 24.0 * 3600.0); // 1 cm/yr in m/s
+    let config = SimulationConfig::from_file(config_path)
+        .unwrap_or_else(|e| {
+            eprintln!("ERROR loading config: {}", e);
+            std::process::exit(1);
+        });
 
-    // Rheologies (Start with lower viscosity for testing convergence)
-    // TODO: Gradually increase to 1e24 once solver is stable
-    let mu_crust = 1e21;  // Reduced from 1e24 for initial testing
-    let _mu_mantle = 1e21;
-    let c0 = 44e6;        // 44 MPa (DES3D cohesion0)
-    let cmin = 4e6;       // 4 MPa (DES3D cohesion1)
-    let phi = 30.0_f64.to_radians();
+    // Extract key parameters from config
+    let (lx, ly, lz) = (config.domain.lx, config.domain.ly, config.domain.lz);
+    let v_extension = config.boundary_conditions.extension_rate_m_per_s;
 
-    // Gravity and Density
-    let g = 9.81;
-    let rho_crust = 2700.0;
-    let rho_mantle = 3300.0;
+    // Get material properties for crust (material ID 0)
+    let mat_crust = get_material_properties(&config, 0);
+    let mu_crust = mat_crust.viscosity;
+    let c0 = mat_crust.cohesion;
+    let cmin = mat_crust.cohesion_min;
+    let phi = mat_crust.friction_angle;
+
+    // Gravity and Density (from config)
+    let g = config.initial_conditions.gravity;
+    let rho_crust = mat_crust.density;
+    let rho_mantle = get_material_properties(&config, 1).density;
     let gravity_vec = Vector3::new(0.0, 0.0, -g);
 
-    // Timestep for 1 Myr simulation
-    let n_steps = 20000;  // 1 Myr total (20000 steps × 5 yr)
-    let dt = 5.0 * (365.25 * 24.0 * 3600.0); // 5 years per step
+    // Timestep and duration from config
+    let dt = config.time_stepping.dt_initial_years * (365.25 * 24.0 * 3600.0); // Convert years to seconds
+    let n_steps = ((config.simulation.total_time_years / config.time_stepping.dt_initial_years) as usize).min(20000);
 
-    // Output and checkpoint intervals (time-based, not step-based)
-    let output_interval_years = 10_000.0; // Output every 10 kyr
-    let quality_check_years = 5_000.0;    // Check mesh quality every 5 kyr
+    // Output and checkpoint intervals from config
+    let output_interval_years = config.simulation.output_interval_years;
+    let quality_check_years = config.simulation.quality_check_interval_years;
 
-    println!("Problem Dimensions (DES3D-matched, viscosity adjusted for un-preconditioned solver):");
-    println!("  Domain: 100 km × 10 km × 10 km");
-    println!("  Extension Rate: 1 cm/yr");
-    println!("  Rheology: EVP (μ = 1e21 Pa·s, c = 44→4 MPa)");
-    println!("  Timestep: {} years", dt / (365.25 * 24.0 * 3600.0));
-    println!("  Duration: {} kyr ({} steps)", n_steps as f64 * dt / (365.25 * 24.0 * 3600.0) / 1000.0, n_steps);
-    println!("  Output interval: {:.1} kyr", output_interval_years / 1000.0);
-    println!("  Quality check interval: {:.1} kyr", quality_check_years / 1000.0);
+    // Print configuration summary
+    config.print_summary();
 
     // ========================================================================
     // Non-dimensionalization Setup (CRITICAL for convergence!)
     // ========================================================================
-    let scales = CharacteristicScales::new(
+    let _scales = CharacteristicScales::new(
         lx,           // Length scale: 100 km (domain width)
         v_extension,  // Velocity scale: 1 cm/yr (extension rate)
         mu_crust,     // Viscosity scale: 1e24 Pa·s (reference viscosity)
@@ -85,107 +83,66 @@ fn main() {
     println!("    - Pressure Block: Inverse Viscosity Approximation");
 
     // ========================================================================
-    // 2. Mesh and Tracer Initialization
+    // 2. Mesh and Tracer Initialization (from config)
     // ========================================================================
 
     println!("\nGenerating Mesh and Tracers...");
-    
-    // User-Defined Resolution (Physical Sizing)
-    // "40x4x4" meant 40 cells in X, 4 in Y, 4 in Z.
-    // Each cell is split into 6 Tetrahedra (Tet10 elements).
-    
-    // Example: 500m resolution in X means target_dx = 500.0
-    // Current default (Fast): 2500m (2.5 km) isotropic
-    let target_dx = 10000.0; 
-    let target_dy = 5000.0; 
-    let target_dz = 5000.0; 
 
-    // Calculate number of cells (at least 1)
-    // The domain length (lx, ly, lz) divided by the target cell size (target_dx, etc.)
-    // is rounded to the nearest integer to get the number of cells.
-    // max(1.0) ensures at least one cell in each dimension, preventing division by zero or empty mesh.
-    let res_x = ((lx as f64) / target_dx).round().max(1.0) as usize;
-    let res_y = ((ly as f64) / target_dy).round().max(1.0) as usize;
-    let res_z = ((lz as f64) / target_dz).round().max(1.0) as usize;
+    // Get grid dimensions from config
+    let (nx, ny, nz) = config.grid_dimensions();
 
-    println!("  Target Resolution: dx={}m, dy={}m, dz={}m", target_dx, target_dy, target_dz);
-    println!("  Grid Dimensions:   {} x {} x {} cells", res_x, res_y, res_z);
+    println!("  Target Resolution: dx={}m, dy={}m, dz={}m", config.domain.dx, config.domain.dy, config.domain.dz);
+    println!("  Grid Dimensions:   {} x {} x {} cells", nx, ny, nz);
 
-    let mut mesh = ImprovedMeshGenerator::generate_cube(res_x, res_y, res_z, lx, ly, lz);
+    let mut mesh = ImprovedMeshGenerator::generate_cube(nx, ny, nz, lx, ly, lz);
     let n_elements = mesh.num_elements();
 
-    // Initialize Tracers (SoA)
-    let mut swarm = TracerSwarm::with_capacity(n_elements * 10);
-    let mut n_tracers = 0;
+    // Initialize Tracers from config
+    let tracers_per_elem = config.tracers.tracers_per_element;
+    let mut swarm = TracerSwarm::with_capacity(n_elements * tracers_per_elem);
 
-    // Distribute tracers (4 tracers per element on average)
-    let nx = 100; let ny = 10; let nz = 10;
-    let dx = lx / nx as f64;
-    let dy = ly / ny as f64;
-    let dz = lz / nz as f64;
-    
-    for i in 0..nx {
-        for j in 0..ny {
-            for k in 0..nz {
-                let p = Point3::new(
-                    i as f64 * dx + dx/2.0,
-                    j as f64 * dy + dy/2.0,
-                    k as f64 * dz + dz/2.0,
-                );
-                
-                // Single-layer model (no crust/mantle distinction for simplicity)
-                let mat_id = 0;
+    // Distribute tracers uniformly within each element
+    let nx_tracer = (tracers_per_elem as f64).powf(1.0/3.0).ceil() as usize;
+    for elem_id in 0..n_elements {
+        let elem = &mesh.connectivity.tet10_elements[elem_id];
 
-                swarm.add_tracer(p, mat_id);
-                n_tracers += 1;
+        // Get element bounding box
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        let mut z_min = f64::INFINITY;
+        let mut z_max = f64::NEG_INFINITY;
+
+        for &node_id in &elem.nodes[0..4] {
+            let p = &mesh.geometry.nodes[node_id];
+            x_min = x_min.min(p.x);
+            x_max = x_max.max(p.x);
+            y_min = y_min.min(p.y);
+            y_max = y_max.max(p.y);
+            z_min = z_min.min(p.z);
+            z_max = z_max.max(p.z);
+        }
+
+        // Place tracers
+        for i in 0..nx_tracer {
+            for j in 0..nx_tracer {
+                for k in 0..nx_tracer {
+                    let p = Point3::new(
+                        x_min + (i as f64 + 0.5) * (x_max - x_min) / nx_tracer as f64,
+                        y_min + (j as f64 + 0.5) * (y_max - y_min) / nx_tracer as f64,
+                        z_min + (k as f64 + 0.5) * (z_max - z_min) / nx_tracer as f64,
+                    );
+                    swarm.add_tracer(p, 0); // Material ID assigned by setup_initial_tracers
+                }
             }
         }
     }
 
-    // DES3D-style dipping weak zone
-    // Geometry: Plane dipping at 60° from horizontal, rotated 15° from vertical
-    let _weakzone_azimuth = 15.0_f64.to_radians(); // Reserved for 3D rotation
-    let weakzone_inclination = -60.0_f64.to_radians(); // -60° = dips downward
-    let weakzone_halfwidth = 1200.0; // 1.2 km
-    let weakzone_depth_min = 0.5 * lz; // 5 km
-    let weakzone_depth_max = 1.0 * lz; // 10 km (full depth)
-    let weakzone_xcenter = 0.5 * lx; // 50 km
-    let weakzone_ycenter = 0.5 * ly; // 5 km
-    let weakzone_plstrain = 0.5; // Initial plastic strain
+    // Setup initial conditions (material IDs and plastic strain) from config
+    setup_initial_tracers(&config, &mesh, &mut swarm);
 
-    // Plane normal (for distance calculation)
-    // Inclination = -60° means the plane dips 60° from horizontal
-    // Normal vector points perpendicular to the plane
-    let cos_inc = weakzone_inclination.cos();
-    let sin_inc = weakzone_inclination.sin();
-
-    // Normal vector in 3D (simplified: assume dip in x-z plane, ignore azimuth for now)
-    let nx = -sin_inc; // Horizontal component
-    let ny = 0.0;
-    let nz = cos_inc;  // Vertical component
-
-    for i in 0..swarm.num_tracers() {
-        let x = swarm.x[i];
-        let y = swarm.y[i];
-        let z = swarm.z[i];
-
-        // Distance from tracer to plane center
-        let dx = x - weakzone_xcenter;
-        let dy = y - weakzone_ycenter;
-        let dz = z;
-
-        // Signed distance to plane
-        let dist_to_plane = (dx * nx + dy * ny + dz * nz).abs();
-
-        // Check if within weak zone bounds
-        let in_depth_range = z >= weakzone_depth_min && z <= weakzone_depth_max;
-        let in_lateral_range = x >= 0.3 * lx && x <= 0.7 * lx; // 30-70% of domain
-
-        if in_depth_range && in_lateral_range && dist_to_plane < weakzone_halfwidth {
-            swarm.plastic_strain[i] = weakzone_plstrain;
-        }
-    }
-    println!("  Mesh: {} elements | Tracers: {}", n_elements, n_tracers);
+    println!("  Mesh: {} elements | Tracers: {}", n_elements, swarm.num_tracers());
 
     // ========================================================================
     // 3. Materials Setup
@@ -239,7 +196,7 @@ fn main() {
         element_pressures[elem_id] = rho_avg * g * depth;
     }
     
-    std::fs::create_dir_all("output/core_complex").ok();
+    std::fs::create_dir_all(&config.output.output_dir).ok();
 
     // ========================================================================
     // Initialize Surface Processes & Mesh Quality Tools
@@ -268,48 +225,86 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.contains(&"--verbose".to_string());
 
+    // ========================================================================
+    // OUTPUT STEP 0: Initial Condition & Boundary Condition Check
+    // ========================================================================
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  STEP 0: Initial Condition Check");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  BC: Extension {:.2} cm/yr, Plane strain Y, Fixed Z-bottom, Free Z-top",
+        config.boundary_conditions.extension_rate_cm_per_year);
+    println!("  Tracers: {} (weak zone: {} with ε_p > 0)", swarm.num_tracers(),
+        swarm.plastic_strain.iter().filter(|&&ps| ps > 0.0).count());
+
+    // Create comprehensive IC/BC output with all fields
+    {
+        let grid_ic = SearchGrid::build(&mesh, [10, 10, 10]);
+        let (elem_mat_ids_ic, elem_strains_ic) = swarm.get_element_properties(&mesh, &grid_ic);
+
+        let mut viz_mesh = mesh.clone();
+
+        // Add velocity field showing boundary conditions
+        // Left: -v, Right: +v, Everything else: zero
+        let mut vel_bc = vec![0.0; mesh.num_nodes() * 3];
+        for &node_id in &left_nodes {
+            vel_bc[node_id * 3] = -v_extension;  // x-component
+        }
+        for &node_id in &right_nodes {
+            vel_bc[node_id * 3] = v_extension;   // x-component
+        }
+        viz_mesh.field_data.add_vector_field(VectorField::from_dof_vector("Velocity", &vel_bc));
+
+        // Add nodal pressure (initial lithostatic)
+        let mut p_nodal = vec![0.0; mesh.num_nodes()];
+        for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+            let elem_pressure = element_pressures[elem_id];
+            for &node_id in &elem.nodes {
+                p_nodal[node_id] = elem_pressure;
+            }
+        }
+        viz_mesh.field_data.add_field(ScalarField::new("PressureNodal", p_nodal));
+
+        // Add element-based data
+        viz_mesh.cell_data.add_field(ScalarField::new("MaterialID", elem_mat_ids_ic.iter().map(|&id| id as f64).collect()));
+        viz_mesh.cell_data.add_field(ScalarField::new("PlasticStrain", elem_strains_ic.clone()));
+        viz_mesh.cell_data.add_field(ScalarField::new("Pressure", element_pressures.clone()));
+        viz_mesh.cell_data.add_field(ScalarField::new("StrainRate_II", vec![0.0; n_elements]));
+        viz_mesh.cell_data.add_field(ScalarField::new("Stress_II", vec![0.0; n_elements]));
+        viz_mesh.cell_data.add_field(ScalarField::new("Viscosity", vec![mu_crust; n_elements]));
+
+        let ic_filename = format!("{}/step_0000.vtu", config.output.output_dir);
+        VtkWriter::write_combined_vtu(&viz_mesh, &swarm, &ic_filename).unwrap();
+    }
+
+    println!("  ✓ Written: {}/step_0000.vtu", config.output.output_dir);
+    println!("═══════════════════════════════════════════════════════════════\n");
+
     println!("\nStarting Tectonic Evolution...");
     let start_sim = Instant::now();
 
     // Time-based output tracking
     let dt_years = dt / (365.25 * 24.0 * 3600.0);
-    let mut next_output_time = 0.0;
+    let mut next_output_time = output_interval_years;  // First output at interval, not at step 0
     let mut next_quality_check_time = 0.0;
+
+    // Calculate ramp steps for spin-up tolerance
+    let ramp_steps = (config.boundary_conditions.ramp_duration_years / dt_years).ceil() as usize;
 
     for step in 0..=n_steps {
         let current_time_years = step as f64 * dt_years;
         // 1. Setup BCs for current mesh state
         let mut dof_mgr = DofManager::new_mixed(mesh.num_nodes(), &mesh.connectivity.corner_nodes());
 
-        // ROOT CAUSE FIX: Ramp-up velocity to prevent initial shock
-        // Instead of instantaneous 1cm/yr at t=0, ramp up over 20 steps (gentle spin-up ~1000 yrs)
-        // Start at 10% velocity to ensure non-zero deformation (well-posed plasticity)
-        let ramp_steps = 20;
-        let velocity_scale = if step < ramp_steps {
-            0.1 + 0.9 * (step as f64) / (ramp_steps as f64)
-        } else {
-            1.0
-        };
-        let v_current = v_extension * velocity_scale;
-        
-        if step < ramp_steps && verbose {
-            println!("    Apply Velocity Ramp: {:.1}% (v = {:.2e} m/s)", velocity_scale * 100.0, v_current);
+        // Apply boundary conditions from config
+        // Use current time for ramp-up (config specifies ramp duration)
+        setup_boundary_conditions(&config, &mesh, &mut dof_mgr, current_time_years);
+
+        if step < 20 && verbose {
+            let ramp_fraction = current_time_years / config.boundary_conditions.ramp_duration_years;
+            println!("    Apply Velocity Ramp: {:.1}% (t = {:.1} kyr)", ramp_fraction * 100.0, current_time_years / 1000.0);
         }
 
-        // Extension BCs
-        for &node_id in &left_nodes { dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), -v_current); }
-        for &node_id in &right_nodes { dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), v_current); }
-
-        // Bottom
-        for &node_id in &bottom_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 2), 0.0);
-        }
-
-        // Free slip on y-boundaries
-        for &node_id in &back_nodes { dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0); }
-        for &node_id in &front_nodes { dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0); }
-
-        // Pin one pressure DOF (Node 0) to remove the constant pressure null space
+        // Pin one pressure DOF to remove the constant pressure null space
         let corners = mesh.connectivity.corner_nodes();
         if !corners.is_empty() {
             if let Some(p_dof) = dof_mgr.pressure_dof(corners[0]) {
@@ -396,7 +391,8 @@ fn main() {
                 &mut linear_solver,
                 &mut current_sol,
                 &dof_mgr,
-                &picard_config
+                &picard_config,
+                None::<fn(&sprs::CsMat<f64>) -> Box<dyn geo_simulator::linalg::Preconditioner>>
             );
             
             // Update solution with the warmed-up result
@@ -586,7 +582,8 @@ fn main() {
         let time_my = current_time_years / 1e6;
 
         // Output and VTK saving (time-based)
-        let should_output = current_time_years >= next_output_time || step == 0 || step == n_steps;
+        // Note: step 0 is already output before the loop with proper BC visualization
+        let should_output = current_time_years >= next_output_time || step == n_steps;
 
         if should_output {
             println!("⏱  {:.2} MY ({:6} steps) | Newton: {:2} | LinIter: {:5} | ||R||: {:.2e} | Mesh: {}/{} OK",
@@ -599,7 +596,7 @@ fn main() {
                 mesh.num_elements()
             );
             next_output_time = current_time_years + output_interval_years;
-            let filename = format!("output/core_complex/step_{:04}.vtu", step);
+            let filename = format!("{}/step_{:04}.vtu", config.output.output_dir, step);
             
             let mut viz_mesh = mesh.clone();
             // Extract velocity part for VectorField
@@ -637,7 +634,7 @@ fn main() {
 
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("  Simulation Completed in {:?}", start_sim.elapsed());
-    println!("  Results saved to output/core_complex/");
+    println!("  Results saved to {}/", config.output.output_dir);
     println!("═══════════════════════════════════════════════════════════════");
 }
 

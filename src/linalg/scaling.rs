@@ -226,7 +226,7 @@ impl CharacteristicScales {
     /// - A_pv (Rate/Velocity):  Scale by v*/(v*/L*) = L*
     /// - A_pp (Rate/Pressure):  Scale by τ*/(v*/L*) = τ*L*/v*
     pub fn nondim_matrix(&self, k_phys: &sprs::CsMat<f64>, dof_mgr: &DofManager) -> sprs::CsMat<f64> {
-        let mut k_nd = k_phys.clone();
+        let k_nd = k_phys.clone();
         let nv = dof_mgr.total_vel_dofs();
 
         // Precompute scaling factors
@@ -282,7 +282,7 @@ impl CharacteristicScales {
     /// Dimensionalize matrix (Dimensionless → Physical)
     /// Used if we need to recover physical stiffness for some reason.
     pub fn dim_matrix(&self, k_nd: &sprs::CsMat<f64>, dof_mgr: &DofManager) -> sprs::CsMat<f64> {
-        let mut k_phys = k_nd.clone();
+        let k_phys = k_nd.clone();
          let nv = dof_mgr.total_vel_dofs();
          
          // Inverse factors

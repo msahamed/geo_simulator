@@ -5,6 +5,8 @@ pub mod physics;
 pub mod fem;
 pub mod linalg;
 pub mod mechanics;
+pub mod config;
+pub mod ic_bc;
 
 pub use mesh::{Mesh, Tet10Element, VtkWriter, ScalarField, VectorField, StressHistory, PlasticityState, TracerSwarm, SearchGrid, MeshQuality, assess_mesh_quality, smooth_mesh_auto, smooth_laplacian, build_node_neighbors, compute_tet_jacobian};
 pub use mesh_generator::MeshGenerator;
@@ -13,3 +15,4 @@ pub use physics::{ThermalField, PressureField, HillslopeDiffusion};
 pub use fem::{Tet10Basis, GaussQuadrature, DofManager, ElementMatrix, Assembler, BoundaryConditions, BoundaryFace, BackwardEuler, TimeStepStats};
 pub use linalg::{Solver, DirectSolver, ConjugateGradient, BiCGSTAB, GMRES, picard_solve, PicardConfig, PicardStats, jfnk_solve, jfnk_solve_nondimensional, JFNKConfig, JFNKStats, CharacteristicScales};
 pub use mechanics::{IsotropicElasticity, NewtonianViscosity, MaxwellViscoelasticity, StrainDisplacement, ElasticityElement, BodyForce, update_stresses_maxwell, DruckerPrager, ElastoViscoPlastic, WinklerFoundation};
+pub use config::SimulationConfig;
