@@ -1,0 +1,153 @@
+# QUICK TEST CONFIG: Ultra-simple for end-to-end verification
+# Purpose: Verify solver can complete a full simulation (minutes, not hours)
+# Units: SI (m, s, Pa, kg) unless otherwise specified
+
+[domain]
+# Domain size (meters) - VERY COARSE
+lx = 100_000.0  # 100 km
+ly = 1_000.0    # 1 km (quasi-2D)
+lz = 20_000.0   # 20 km
+
+# Mesh resolution (meters) - ULTRA COARSE (just 10 elements)
+dx = 50_000.0   # 50 km (2 cells)
+dy = 1_000.0    # 1 km (1 cell)
+dz = 10_000.0   # 10 km (2 cells)
+
+[simulation]
+# Total simulation time (years) - VERY SHORT
+total_time_years = 10_000.0  # 10 kyr (quick test)
+
+# Output frequency (years) - FREQUENT for monitoring
+output_interval_years = 500.0  # 0.5 kyr
+
+# Mesh quality check interval (years)
+quality_check_interval_years = 2_000.0  # 2 kyr
+
+[boundary_conditions]
+# Extension rate (m/s) - SAME
+extension_rate_cm_per_year = 1.0
+extension_rate_m_per_s = 3.17e-10  # = 1 cm/yr
+
+# Velocity ramp-up (years) - VERY SHORT
+ramp_duration_years = 1_000.0  # 1 kyr (fast ramp for testing)
+
+# Boundary types - SAME
+bc_x0 = "velocity"
+bc_x1 = "velocity"
+bc_y0 = "plane_strain"
+bc_y1 = "plane_strain"
+bc_z0 = "free_surface"
+bc_z1 = "fixed_normal"
+
+[initial_conditions]
+# Temperature field
+surface_temp_kelvin = 273.0
+moho_temp_kelvin = 873.0
+use_geotherm = true
+
+# Stress state
+use_lithostatic_pressure = true
+gravity = 9.81
+
+[materials]
+# SINGLE HOMOGENEOUS MATERIAL - Very simple
+[materials.upper_crust]
+depth_top = 0.0
+depth_bottom = 20_000.0  # Full depth (20 km)
+density = 2700.0
+viscosity = 1.0e21  # Pa·s
+cohesion_mpa = 44.0
+cohesion_min_mpa = 4.0
+friction_angle = 30.0
+shear_modulus_pa = 3.0e10
+
+# Lower crust DISABLED
+[materials.lower_crust]
+depth_top = 20_000.0
+depth_bottom = 20_000.0  # Zero thickness
+density = 2700.0
+viscosity = 1.0e21
+cohesion_mpa = 44.0
+cohesion_min_mpa = 4.0
+friction_angle = 30.0
+shear_modulus_pa = 3.0e10
+
+# Weak zone DISABLED
+[materials.weak_zone]
+enabled = false
+geometry = "dipping_plane"
+x_center = 50_000.0
+y_center = 500.0
+depth_min = 10_000.0
+depth_max = 20_000.0
+dip_angle = -60.0
+azimuth = 15.0
+half_width = 1_200.0
+viscosity = 1.0e21
+cohesion_mpa = 44.0
+cohesion_min_mpa = 4.0
+initial_plastic_strain = 0.0
+
+[time_stepping]
+# Fixed time stepping (adaptive NOT implemented yet)
+use_adaptive = false
+
+# Time step (years) - LARGE for speed
+dt_min_years = 10.0
+dt_max_years = 100.0
+dt_initial_years = 20.0  # 20 year timestep → only 500 steps for 10 kyr
+
+# CFL condition (not used yet)
+cfl_target = 0.5
+use_cfl_constraint = false
+use_maxwell_constraint = false
+use_mesh_quality_constraint = true
+
+[solver]
+# Non-linear solver
+nonlinear_solver = "JFNK"
+max_nonlinear_iterations = 20
+nonlinear_tolerance = 5.0e-4
+nonlinear_abs_tolerance = 1.0e-7
+
+# Linear solver - RELAXED for speed
+linear_solver = "GMRES"
+gmres_restart = 150  # Smaller restart
+gmres_max_iterations = 800  # Fewer iterations
+gmres_tolerance = 2.0e-4  # Relaxed tolerance
+gmres_abs_tolerance = 1.0e-9
+
+# Preconditioner
+use_picard_warmstart = false
+picard_warmstart_iterations = 0
+
+# Scaling
+use_nondimensionalization = true
+
+[tracers]
+# Minimal tracers
+tracers_per_element = 2  # Just 2 per element
+total_tracers = 24  # 12 elements × 2
+
+[output]
+# Output format
+format = "VTK"
+output_dir = "./output/quick_test"
+
+# Fields to save
+save_velocity = true
+save_pressure = true
+save_stress = true
+save_strain = true
+save_material_id = true
+save_tracers = true
+
+[physics]
+# Enable/disable physics
+gravity_enabled = true
+surface_processes_enabled = false
+thermal_diffusion_enabled = false
+winkler_foundation_enabled = false
+
+# Surface diffusion (disabled)
+surface_diffusion_kappa = 0.0

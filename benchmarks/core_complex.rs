@@ -7,7 +7,7 @@ use geo_simulator::{
     picard_solve, PicardConfig, CharacteristicScales,
     SimulationConfig,
 };
-use geo_simulator::ic_bc::{setup_boundary_conditions, setup_initial_tracers, get_material_properties};
+use geo_simulator::ic_bc::{setup_boundary_conditions, setup_initial_tracers, get_material_properties, MaterialProps};
 use nalgebra::{Point3, Vector3};
 use std::time::Instant;
 use rayon::prelude::*;
@@ -39,10 +39,7 @@ fn main() {
 
     // Get material properties for crust (material ID 0)
     let mat_crust = get_material_properties(&config, 0);
-    let mu_crust = mat_crust.viscosity;
-    let c0 = mat_crust.cohesion;
-    let cmin = mat_crust.cohesion_min;
-    let phi = mat_crust.friction_angle;
+    let mu_crust = mat_crust.viscosity;  // Used for viscosity scaling
 
     // Gravity and Density (from config)
     let g = config.initial_conditions.gravity;
@@ -64,10 +61,10 @@ fn main() {
     // ========================================================================
     // Non-dimensionalization Setup (CRITICAL for convergence!)
     // ========================================================================
-    let _scales = CharacteristicScales::new(
+    let scales = CharacteristicScales::new(
         lx,           // Length scale: 100 km (domain width)
         v_extension,  // Velocity scale: 1 cm/yr (extension rate)
-        mu_crust,     // Viscosity scale: 1e24 Pa·s (reference viscosity)
+        mu_crust,     // Viscosity scale (reference viscosity)
         rho_crust,    // Density scale: 2700 kg/m³
         g,            // Gravity: 9.81 m/s²
     );
@@ -79,7 +76,7 @@ fn main() {
     println!("  Linear Solver:     GMRES (Restart=200, MaxIter=2000)");
     println!("  Linear Tolerance:  Rel=1e-4, Abs=1e-9 (Dimensionless)");
     println!("  Preconditioner:    Block Triangular (Upper Schur)");
-    println!("    - Velocity Block: ILU (Incomplete LU) - Robust but Slower Setup");
+    println!("    - Velocity Block: AMG (Algebraic Multigrid) - Fast Setup");
     println!("    - Pressure Block: Inverse Viscosity Approximation");
 
     // ========================================================================
@@ -145,14 +142,36 @@ fn main() {
     println!("  Mesh: {} elements | Tracers: {}", n_elements, swarm.num_tracers());
 
     // ========================================================================
-    // 3. Materials Setup
+    // 3. Materials Setup (from config)
     // ========================================================================
 
+    // Create materials for all possible material IDs (0=upper, 1=lower, 2=weak zone)
+    // Even if layers are disabled, we need the material objects to avoid index errors
+    let mat_upper = get_material_properties(&config, 0);
+    let mat_lower = get_material_properties(&config, 1);
+    let mat_weak = if config.materials.weak_zone.enabled {
+        MaterialProps {
+            density: mat_lower.density,
+            viscosity: config.materials.weak_zone.viscosity,
+            cohesion: config.materials.weak_zone.cohesion_mpa * 1e6,
+            cohesion_min: config.materials.weak_zone.cohesion_min_mpa * 1e6,
+            friction_angle: mat_lower.friction_angle,
+            shear_modulus: mat_lower.shear_modulus,
+        }
+    } else {
+        mat_lower  // Use lower crust properties if weak zone disabled
+    };
+
     let materials = vec![
-        // Single material: EVP with DES3D parameters
-        // Softening: c0=44MPa → c1=4MPa over εp=0→0.5
-        ElastoViscoPlastic::new(100e9, 0.25, mu_crust, c0, phi)
-            .with_softening(cmin, 0.5, 0.5), // Fully softened at εp=0.5 (DES3D: pls1)
+        // Material 0: Upper crust
+        ElastoViscoPlastic::new(100e9, 0.25, mat_upper.viscosity, mat_upper.cohesion, mat_upper.friction_angle)
+            .with_softening(mat_upper.cohesion_min, 0.5, 0.5),
+        // Material 1: Lower crust
+        ElastoViscoPlastic::new(100e9, 0.25, mat_lower.viscosity, mat_lower.cohesion, mat_lower.friction_angle)
+            .with_softening(mat_lower.cohesion_min, 0.5, 0.5),
+        // Material 2: Weak zone (or lower crust if disabled)
+        ElastoViscoPlastic::new(100e9, 0.25, mat_weak.viscosity, mat_weak.cohesion, mat_weak.friction_angle)
+            .with_softening(mat_weak.cohesion_min, 0.5, 0.5),
     ];
 
     let mut left_nodes = Vec::new();
@@ -326,6 +345,8 @@ fn main() {
         jfnk_config.abs_tolerance = 1e-7;   // Relaxed absolute tolerance
         jfnk_config.max_newton_iterations = 20; // Reduced - converging in 5-6 iterations
         jfnk_config.verbose = verbose;
+        jfnk_config.use_amg = true;         // Use AMG instead of ILU (faster setup)
+        jfnk_config.amg_strength_threshold = 0.25;  // Standard value
 
         // Linear solver: GMRES with balanced settings
         let mut linear_solver = GMRES::new()
@@ -404,18 +425,19 @@ fn main() {
             }
         }
         
-        // 5. Run JFNK Solver
-        // NOTE: Using built-in equilibration instead of explicit nondimensionalization
-        // to avoid double-scaling issues. Equilibration brings system to O(1) automatically.
+        // 5. Run JFNK Solver with Non-dimensionalization
+        // This converts physical units → O(1) dimensionless → solve → convert back
+        // CRITICAL: Without this, matrix has 30+ orders of magnitude variation!
 
-        // Solve nonlinear system
-        let (sol_new, jfnk_stats) = geo_simulator::jfnk_solve(
+        // Solve nonlinear system in non-dimensional space
+        let (sol_new, jfnk_stats) = geo_simulator::jfnk_solve_nondimensional(
             assembler,
             residual_evaluator,
             &mut linear_solver,
             &mut current_sol,
             &dof_mgr,
             &jfnk_config,
+            &scales,
         );
 
         // Report convergence
