@@ -110,9 +110,9 @@ max_nonlinear_iterations = 20
 nonlinear_tolerance = 5.0e-4
 nonlinear_abs_tolerance = 1.0e-7
 
-# Linear solver - RELAXED for speed
+# Linear solver - OPTIMIZED for saddle-point systems
 linear_solver = "GMRES"
-gmres_restart = 150  # Smaller restart
+gmres_restart = 10  # Optimal for saddle-point (was 150)
 gmres_max_iterations = 800  # Fewer iterations
 gmres_tolerance = 2.0e-4  # Relaxed tolerance
 gmres_abs_tolerance = 1.0e-9

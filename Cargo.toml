@@ -65,6 +65,14 @@ name = "core_complex"
 path = "benchmarks/core_complex.rs"
 
 [[bin]]
+name = "picard_simple"
+path = "benchmarks/picard_simple.rs"
+
+[[bin]]
+name = "newton_simple"
+path = "benchmarks/newton_simple.rs"
+
+[[bin]]
 name = "core_complex_2d"
 path = "benchmarks/core_complex_2d.rs"
 

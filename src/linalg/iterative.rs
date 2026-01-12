@@ -314,7 +314,7 @@ impl GMRES {
     pub fn new() -> Self {
         Self {
             max_iterations: 1000,
-            restart: 30,
+            restart: 10,  // Reduced from 30 for saddle-point systems
             tolerance: 1e-8,
             abs_tolerance: 1e-12,
             use_preconditioner: true,

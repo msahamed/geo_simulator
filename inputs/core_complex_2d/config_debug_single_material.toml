@@ -17,8 +17,8 @@ dz = 5_000.0    # 5 km (was 3 km)
 # Total simulation time (years) - SHORTER for debugging
 total_time_years = 100_000.0  # 100 kyr (was 2 Myr)
 
-# Output frequency (years) - FREQUENT for monitoring
-output_interval_years = 1_000.0  # 1 kyr (was 10 kyr)
+# Output frequency (years) - Reduced for less file output
+output_interval_years = 10_000.0  # 10 kyr (100 Ky / 10 = 10 outputs)
 
 # Mesh quality check interval (years)
 quality_check_interval_years = 5_000.0  # 5 kyr
@@ -56,7 +56,7 @@ depth_top = 0.0
 depth_bottom = 30_000.0  # Full depth
 density = 2700.0
 viscosity = 1.0e21  # Pa·s (middle value)
-cohesion_mpa = 44.0
+cohesion_mpa = 30.0  # Reduced for easier yielding
 cohesion_min_mpa = 4.0
 friction_angle = 30.0
 shear_modulus_pa = 3.0e10
@@ -72,37 +72,37 @@ cohesion_min_mpa = 4.0
 friction_angle = 30.0
 shear_modulus_pa = 3.0e10
 
-# Weak zone DISABLED
+# Weak zone ENABLED for localization
 [materials.weak_zone]
-enabled = false
+enabled = true
 geometry = "dipping_plane"
 x_center = 50_000.0
 y_center = 500.0
-depth_min = 15_000.0
-depth_max = 30_000.0
+depth_min = 5_000.0   # Start at 5 km depth
+depth_max = 20_000.0  # Extend to bottom (domain is 20 km)
 dip_angle = -60.0
 azimuth = 15.0
-half_width = 1_200.0
-viscosity = 1.0e21
-cohesion_mpa = 44.0
+half_width = 2_000.0  # Wider zone for easier initialization
+viscosity = 1.0e20  # Lower viscosity for easier deformation
+cohesion_mpa = 20.0  # Reduced for easier yielding
 cohesion_min_mpa = 4.0
 initial_plastic_strain = 0.0  # No pre-strain
 
 [time_stepping]
 # Adaptive time stepping
-use_adaptive = false  # FIXED timestep for debugging
+use_adaptive = true  # Enable adaptive CFL-based timestepping
 
 # Time step limits (years)
-dt_min_years = 1.0
-dt_max_years = 100.0
-dt_initial_years = 5.0  # Fixed 5 year timestep
+dt_min_years = 10.0     # Minimum timestep
+dt_max_years = 2000.0   # Maximum timestep (2 kyr)
+dt_initial_years = 500.0  # Initial timestep (500 years)
 
 # CFL condition
-cfl_target = 0.5
+cfl_target = 0.5  # Standard CFL number for advection
 
 # Constraints
-use_cfl_constraint = false
-use_maxwell_constraint = false
+use_cfl_constraint = true   # Enable CFL constraint
+use_maxwell_constraint = false  # Maxwell time not needed for viscous flow
 use_mesh_quality_constraint = true
 
 [solver]
@@ -114,10 +114,10 @@ nonlinear_abs_tolerance = 1.0e-7
 
 # Linear solver
 linear_solver = "GMRES"
-gmres_restart = 200
-gmres_max_iterations = 2000
-gmres_tolerance = 1.0e-4
-gmres_abs_tolerance = 1.0e-9
+gmres_restart = 200  # Larger restart for Stokes saddle-point system
+gmres_max_iterations = 8000
+gmres_tolerance = 5.0e-3  # Relaxed for faster convergence
+gmres_abs_tolerance = 1.0e-8
 
 # Preconditioner
 use_picard_warmstart = false  # Skip for simplicity

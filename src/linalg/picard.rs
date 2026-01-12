@@ -237,6 +237,10 @@ where
         // 6. Check convergence
         let converged = relative_change < config.tolerance;
 
+        // Print progress
+        println!("    Picard iter {:2}: rel_change = {:.3e}, converged = {}",
+                 picard_iter + 1, relative_change, converged);
+
         if converged {
             // Copy relaxed solution back to guess array
             velocity_guess.copy_from_slice(&velocity_relaxed);
