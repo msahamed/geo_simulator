@@ -6,7 +6,6 @@ pub mod fem;
 pub mod linalg;
 pub mod mechanics;
 pub mod config;
-pub mod ic_bc;  // Kept for backwards compatibility - re-exports from ic and bc
 pub mod ic;     // Initial conditions
 pub mod bc;     // Boundary conditions
 pub mod updates;

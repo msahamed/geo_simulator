@@ -2,15 +2,18 @@
 ///
 use geo_simulator::{
     ImprovedMeshGenerator, DofManager, Assembler, GMRES, VectorField,
-    VtkWriter, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField,
+    VtkOutputBuilder, ElastoViscoPlastic, TracerSwarm, SearchGrid, ScalarField,
     HillslopeDiffusion, assess_mesh_quality, smooth_mesh_auto, WinklerFoundation,
     picard_solve, PicardConfig, CharacteristicScales, AMGPreconditioner,
     SimulationConfig,
-    compute_element_properties, compute_visualization_fields, update_tracer_properties, advect_tracers_and_mesh, compute_adaptive_timestep,
+    compute_element_properties, compute_visualization_fields, update_tracer_properties, advect_tracers_and_mesh,
 };
 use geo_simulator::linalg::preconditioner::{ILUPreconditioner, IdentityPreconditioner, BlockDiagonalPreconditioner, JacobiPreconditioner};
-use geo_simulator::ic_bc::{setup_boundary_conditions, setup_initial_tracers, get_material_properties, MaterialProps};
-use nalgebra::{Point3, Vector3};
+use geo_simulator::bc::setup_boundary_conditions;
+use geo_simulator::ic::{initialize_lithostatic_pressure, initialize_extension_velocity, get_gravity_vector, setup_initial_tracers, get_material_properties, MaterialProps};
+use geo_simulator::utils::units::{years_to_seconds, seconds_to_years};
+use geo_simulator::timestepping::compute_adaptive_timestep;
+use nalgebra::Point3;
 use std::time::Instant;
 
 fn main() {
@@ -43,15 +46,15 @@ fn main() {
     let mu_crust = mat_crust.viscosity;  // Used for viscosity scaling
 
     // Gravity and Density (from config)
-    let g = config.initial_conditions.gravity;
     let rho_crust = mat_crust.density;
     let _rho_mantle = get_material_properties(&config, 1).density;
-    let gravity_vec = Vector3::new(0.0, 0.0, -g);
+    let gravity_vec = get_gravity_vector(&config.initial_conditions);
+    let g = gravity_vec.z.abs();  // Gravity magnitude for scaling
 
-    // Timestep configuration from config
-    let dt_min_sec = config.time_stepping.dt_min_years * (365.25 * 24.0 * 3600.0);
-    let dt_max_sec = config.time_stepping.dt_max_years * (365.25 * 24.0 * 3600.0);
-    let dt_initial_sec = config.time_stepping.dt_initial_years * (365.25 * 24.0 * 3600.0);
+    // Timestep configuration from config (using utils::units)
+    let dt_min_sec = years_to_seconds(config.time_stepping.dt_min_years);
+    let dt_max_sec = years_to_seconds(config.time_stepping.dt_max_years);
+    let dt_initial_sec = years_to_seconds(config.time_stepping.dt_initial_years);
     let use_adaptive = config.time_stepping.use_adaptive;
     let use_cfl_constraint = config.time_stepping.use_cfl_constraint;
     let use_maxwell_constraint = config.time_stepping.use_maxwell_constraint;
@@ -59,7 +62,7 @@ fn main() {
 
     // Initial timestep
     let mut dt = dt_initial_sec;
-    let total_time_sec = config.simulation.total_time_years * (365.25 * 24.0 * 3600.0);
+    let total_time_sec = years_to_seconds(config.simulation.total_time_years);
     let max_steps = 20000; // Safety limit
 
     // Output and checkpoint intervals from config
@@ -209,27 +212,20 @@ fn main() {
     // ========================================================================
 
     let dof_mgr_init = DofManager::new_mixed(mesh.num_nodes(), &mesh.connectivity.corner_nodes());
-    let n_dofs_total = dof_mgr_init.total_dofs();
-    let mut current_sol = vec![0.0; n_dofs_total];
+    let _n_dofs_total = dof_mgr_init.total_dofs();
 
-    // CRITICAL: Initialize velocity with non-zero guess based on BCs
-    for (node_id, node) in mesh.geometry.nodes.iter().enumerate() {
-        let x_normalized = node.x / lx;
-        current_sol[dof_mgr_init.velocity_dof(node_id, 0)] = v_extension * (2.0 * x_normalized - 1.0);
-    }
+    // CRITICAL: Initialize velocity with smart initial guess (improves convergence)
+    let mut current_sol = initialize_extension_velocity(&mesh, &dof_mgr_init, v_extension, lx);
 
-
-    let mut element_pressures = vec![0.0; n_elements];
     let mut _prev_picard_iters = 0;  // Track previous Picard iterations for adaptive config
-    
-    // Initial lithostatic pressure for step 0
-    let rho_avg = rho_crust; // Single-layer model
-    for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
-        let mut z_sum = 0.0;
-        for &node_id in &elem.nodes { z_sum += mesh.geometry.nodes[node_id].z; }
-        let depth = (lz - z_sum / 10.0).max(0.0);
-        element_pressures[elem_id] = rho_avg * g * depth;
-    }
+
+    // Initial lithostatic pressure (using new ic module)
+    let mut element_pressures = initialize_lithostatic_pressure(
+        &config.initial_conditions,
+        &mesh,
+        rho_crust,
+        lz
+    );
     
     std::fs::create_dir_all(&config.output.output_dir).ok();
 
@@ -327,7 +323,10 @@ fn main() {
         viz_mesh.cell_data.add_field(ScalarField::new("PlasticViscosity", vec![1e30; n_elements]));
 
         let ic_filename = format!("{}/step_0000.vtu", config.output.output_dir);
-        VtkWriter::write_nodal_vtu(&viz_mesh, &swarm, &ic_filename).unwrap();
+        VtkOutputBuilder::new(&viz_mesh)
+            .with_tracers(&swarm)
+            .write(&ic_filename)
+            .unwrap();
     }
 
     println!("  ✓ Written: {}/step_0000.vtu", config.output.output_dir);
@@ -345,11 +344,11 @@ fn main() {
     let mut step = 0;
 
     // Calculate ramp steps for spin-up tolerance (approximate, will adapt)
-    let dt_years_initial = dt / (365.25 * 24.0 * 3600.0);
+    let dt_years_initial = seconds_to_years(dt);
     let ramp_steps = (config.boundary_conditions.ramp_duration_years / dt_years_initial).ceil() as usize;
 
     while current_time_sec < total_time_sec && step <= max_steps {
-        let current_time_years = current_time_sec / (365.25 * 24.0 * 3600.0);
+        let current_time_years = seconds_to_years(current_time_sec);
         // 1. Setup BCs for current mesh state
         let mut dof_mgr = DofManager::new_mixed(mesh.num_nodes(), &mesh.connectivity.corner_nodes());
 
@@ -538,9 +537,9 @@ fn main() {
 
             if verbose && step < 20 {
                 println!("    Adaptive dt: {:.1} yr (CFL: {:.1} yr, Maxwell: {:.2e} yr, v_max: {:.2e} m/s)",
-                    dt / (365.25 * 24.0 * 3600.0),
-                    adaptive_dt_info.cfl_dt / (365.25 * 24.0 * 3600.0),
-                    adaptive_dt_info.maxwell_dt / (365.25 * 24.0 * 3600.0),
+                    seconds_to_years(dt),
+                    seconds_to_years(adaptive_dt_info.cfl_dt),
+                    seconds_to_years(adaptive_dt_info.maxwell_dt),
                     adaptive_dt_info.max_velocity);
             }
         }
@@ -645,7 +644,7 @@ fn main() {
 
         // 5b. Surface Diffusion (every 10 steps, ~50 kyr)
         if step % 10 == 0 && step > 0 {
-            let dt_diffusion = 10.0 * dt / (365.25 * 24.0 * 3600.0); // Convert to years
+            let dt_diffusion = seconds_to_years(10.0 * dt); // Convert to years
             diffusion.apply_diffusion(&mut mesh, dt_diffusion);
         }
 
@@ -713,7 +712,10 @@ fn main() {
             viz_mesh.cell_data.add_field(ScalarField::new("PlasticViscosity", plastic_viscosity.clone()));
 
             // Use nodal output (all data on nodes, no multi-block) for better ParaView compatibility
-            VtkWriter::write_nodal_vtu(&viz_mesh, &swarm, &filename).unwrap();
+            VtkOutputBuilder::new(&viz_mesh)
+                .with_tracers(&swarm)
+                .write(&filename)
+                .unwrap();
         }
 
         // Advance time and step counter

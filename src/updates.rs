@@ -2,18 +2,12 @@
 //!
 //! This module provides reusable functions for updating physical properties,
 //! visualization fields, and state variables during time-stepping.
-//!
-//! **Note**: Adaptive timestep functionality has been moved to the `timestepping` module.
-//! Use `crate::timestepping::{AdaptiveTimestep, compute_adaptive_timestep}` instead.
 
 use crate::fem::{DofManager, GaussQuadrature, Tet10Basis};
 use crate::mechanics::{ElastoViscoPlastic, StrainDisplacement};
 use crate::mesh::{Mesh, TracerSwarm, SearchGrid};
 use nalgebra::Point3;
 use rayon::prelude::*;
-
-// Re-export adaptive timestep from new location for backwards compatibility
-pub use crate::timestepping::{AdaptiveTimestep, compute_adaptive_timestep};
 
 /// Physical properties for an element
 #[derive(Debug, Clone, Copy)]
@@ -272,6 +266,3 @@ pub fn advect_tracers_and_mesh(
         node.z += current_sol[dof_mgr.velocity_dof(node_id, 2)] * dt;
     }
 }
-
-// Adaptive timestep functionality has been moved to crate::timestepping::adaptive
-// See re-export at the top of this file for backwards compatibility
