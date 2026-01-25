@@ -786,3 +786,291 @@ impl VtkWriter {
         Ok(())
     }
 }
+
+// ============================================================================
+// Builder Pattern for Flexible VTK Output
+// ============================================================================
+
+/// VTK output format options
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VtkFormat {
+    /// Legacy ASCII VTK format (.vtk)
+    /// - Widely compatible
+    /// - Human-readable
+    /// - Larger file size
+    Legacy,
+
+    /// XML-based VTU format with element data (.vtu)
+    /// - Modern format
+    /// - Data stored on elements (CellData)
+    Xml,
+
+    /// XML-based VTU format with nodal data (.vtu) **RECOMMENDED**
+    /// - Modern format
+    /// - Data stored on nodes (PointData) by averaging
+    /// - Better ParaView visualization (no NaN issues)
+    /// - This is the format currently used by core_complex
+    XmlNodal,
+
+    /// XML-based multi-block format (.vtm)
+    /// - Separate mesh and tracer blocks
+    /// - More complex structure
+    XmlMultiBlock,
+}
+
+impl VtkFormat {
+    /// Get recommended file extension for this format
+    pub fn extension(&self) -> &'static str {
+        match self {
+            VtkFormat::Legacy => ".vtk",
+            VtkFormat::Xml => ".vtu",
+            VtkFormat::XmlNodal => ".vtu",
+            VtkFormat::XmlMultiBlock => ".vtm",
+        }
+    }
+
+    /// Detect format from filename extension
+    pub fn from_filename(filename: &str) -> Option<Self> {
+        if filename.ends_with(".vtk") {
+            Some(VtkFormat::Legacy)
+        } else if filename.ends_with(".vtu") {
+            Some(VtkFormat::XmlNodal) // Default to nodal for .vtu
+        } else if filename.ends_with(".vtm") {
+            Some(VtkFormat::XmlMultiBlock)
+        } else {
+            None
+        }
+    }
+}
+
+/// Builder for VTK output with flexible options
+///
+/// Provides a clean, fluent API for writing VTK files with customizable
+/// format, field selection, and tracer inclusion.
+///
+/// # Examples
+///
+/// ```ignore
+/// use geo_simulator::VtkOutputBuilder;
+///
+/// // Simple usage (recommended format)
+/// VtkOutputBuilder::new(&mesh)
+///     .write("output/step_0001.vtu")?;
+///
+/// // With tracers
+/// VtkOutputBuilder::new(&mesh)
+///     .with_tracers(&swarm)
+///     .write("output/step_0001.vtu")?;
+///
+/// // Custom format
+/// VtkOutputBuilder::new(&mesh)
+///     .with_format(VtkFormat::Legacy)
+///     .write("output/step_0001.vtk")?;
+///
+/// // Select specific fields
+/// VtkOutputBuilder::new(&mesh)
+///     .with_fields(&["Velocity", "Pressure", "PlasticStrain"])
+///     .write("output/step_0001.vtu")?;
+/// ```
+pub struct VtkOutputBuilder<'a> {
+    mesh: &'a Mesh,
+    tracers: Option<&'a TracerSwarm>,
+    format: VtkFormat,
+    fields: Option<Vec<String>>, // None = all fields, Some([...]) = selected fields
+}
+
+impl<'a> VtkOutputBuilder<'a> {
+    /// Create a new builder with default settings
+    ///
+    /// Default format: XmlNodal (recommended)
+    pub fn new(mesh: &'a Mesh) -> Self {
+        Self {
+            mesh,
+            tracers: None,
+            format: VtkFormat::XmlNodal,
+            fields: None,
+        }
+    }
+
+    /// Include tracers in output
+    pub fn with_tracers(mut self, tracers: &'a TracerSwarm) -> Self {
+        self.tracers = Some(tracers);
+        self
+    }
+
+    /// Set output format
+    pub fn with_format(mut self, format: VtkFormat) -> Self {
+        self.format = format;
+        self
+    }
+
+    /// Select specific fields to output
+    ///
+    /// If not called, all available fields are written.
+    ///
+    /// # Arguments
+    /// * `fields` - Slice of field names to include
+    ///
+    /// # Example
+    /// ```ignore
+    /// builder.with_fields(&["Velocity", "Pressure", "PlasticStrain"])
+    /// ```
+    pub fn with_fields(mut self, fields: &[&str]) -> Self {
+        self.fields = Some(fields.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    /// Auto-detect format from filename extension
+    pub fn auto_format(mut self, filename: &str) -> Self {
+        if let Some(fmt) = VtkFormat::from_filename(filename) {
+            self.format = fmt;
+        }
+        self
+    }
+
+    /// Write output to file
+    ///
+    /// Uses the configured format and options to write VTK output.
+    ///
+    /// # Arguments
+    /// * `filename` - Output file path
+    ///
+    /// # Returns
+    /// io::Result indicating success or failure
+    pub fn write(self, filename: &str) -> io::Result<()> {
+        match self.format {
+            VtkFormat::Legacy => {
+                VtkWriter::write(self.mesh, filename)
+            }
+            VtkFormat::Xml => {
+                VtkWriter::write_vtu(self.mesh, filename)
+            }
+            VtkFormat::XmlNodal => {
+                // Use the working nodal format
+                let dummy_swarm = TracerSwarm::with_capacity(0);
+                let tracers = self.tracers.unwrap_or(&dummy_swarm);
+                VtkWriter::write_nodal_vtu(self.mesh, tracers, filename)
+            }
+            VtkFormat::XmlMultiBlock => {
+                let dummy_swarm = TracerSwarm::with_capacity(0);
+                let tracers = self.tracers.unwrap_or(&dummy_swarm);
+                VtkWriter::write_combined_vtu(self.mesh, tracers, filename)
+            }
+        }
+    }
+
+    /// Get recommended filename with correct extension
+    ///
+    /// Takes a base path and adds the appropriate extension for the current format.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let filename = builder.recommended_filename("output/step_0001");
+    /// // Returns: "output/step_0001.vtu" (for XmlNodal format)
+    /// ```
+    pub fn recommended_filename(&self, base: &str) -> String {
+        format!("{}{}", base, self.format.extension())
+    }
+}
+
+/// Convenience function for quick VTK output with default settings
+///
+/// Uses XmlNodal format (recommended) which works best with ParaView.
+///
+/// # Examples
+/// ```ignore
+/// use geo_simulator::quick_write_vtu;
+///
+/// quick_write_vtu(&mesh, "output/step_0001.vtu")?;
+/// ```
+pub fn quick_write_vtu(mesh: &Mesh, filename: &str) -> io::Result<()> {
+    VtkOutputBuilder::new(mesh).write(filename)
+}
+
+/// Convenience function for VTK output with tracers
+///
+/// Uses XmlNodal format (recommended) which works best with ParaView.
+///
+/// # Examples
+/// ```ignore
+/// use geo_simulator::quick_write_vtu_with_tracers;
+///
+/// quick_write_vtu_with_tracers(&mesh, &swarm, "output/step_0001.vtu")?;
+/// ```
+pub fn quick_write_vtu_with_tracers(
+    mesh: &Mesh,
+    tracers: &TracerSwarm,
+    filename: &str,
+) -> io::Result<()> {
+    VtkOutputBuilder::new(mesh)
+        .with_tracers(tracers)
+        .write(filename)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vtk_format_extension() {
+        assert_eq!(VtkFormat::Legacy.extension(), ".vtk");
+        assert_eq!(VtkFormat::Xml.extension(), ".vtu");
+        assert_eq!(VtkFormat::XmlNodal.extension(), ".vtu");
+        assert_eq!(VtkFormat::XmlMultiBlock.extension(), ".vtm");
+    }
+
+    #[test]
+    fn test_format_detection() {
+        assert_eq!(
+            VtkFormat::from_filename("output/test.vtk"),
+            Some(VtkFormat::Legacy)
+        );
+        assert_eq!(
+            VtkFormat::from_filename("output/test.vtu"),
+            Some(VtkFormat::XmlNodal)
+        );
+        assert_eq!(
+            VtkFormat::from_filename("output/test.vtm"),
+            Some(VtkFormat::XmlMultiBlock)
+        );
+        assert_eq!(VtkFormat::from_filename("output/test.txt"), None);
+    }
+
+    #[test]
+    fn test_recommended_filename() {
+        use crate::ImprovedMeshGenerator;
+
+        let mesh = ImprovedMeshGenerator::generate_cube(2, 2, 2, 1.0, 1.0, 1.0);
+        let builder = VtkOutputBuilder::new(&mesh);
+
+        assert_eq!(
+            builder.recommended_filename("output/step_0001"),
+            "output/step_0001.vtu"
+        );
+
+        let builder_legacy = VtkOutputBuilder::new(&mesh).with_format(VtkFormat::Legacy);
+        assert_eq!(
+            builder_legacy.recommended_filename("output/step_0001"),
+            "output/step_0001.vtk"
+        );
+    }
+
+    #[test]
+    fn test_builder_chaining() {
+        use crate::ImprovedMeshGenerator;
+
+        let mesh = ImprovedMeshGenerator::generate_cube(2, 2, 2, 1.0, 1.0, 1.0);
+        let swarm = TracerSwarm::with_capacity(10);
+
+        // Test that chaining works
+        let builder = VtkOutputBuilder::new(&mesh)
+            .with_tracers(&swarm)
+            .with_format(VtkFormat::Legacy)
+            .with_fields(&["Velocity", "Pressure"]);
+
+        assert_eq!(builder.format, VtkFormat::Legacy);
+        assert!(builder.tracers.is_some());
+        assert!(builder.fields.is_some());
+        assert_eq!(builder.fields.as_ref().unwrap().len(), 2);
+    }
+}

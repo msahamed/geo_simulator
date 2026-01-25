@@ -2,12 +2,18 @@
 //!
 //! This module provides reusable functions for updating physical properties,
 //! visualization fields, and state variables during time-stepping.
+//!
+//! **Note**: Adaptive timestep functionality has been moved to the `timestepping` module.
+//! Use `crate::timestepping::{AdaptiveTimestep, compute_adaptive_timestep}` instead.
 
 use crate::fem::{DofManager, GaussQuadrature, Tet10Basis};
 use crate::mechanics::{ElastoViscoPlastic, StrainDisplacement};
 use crate::mesh::{Mesh, TracerSwarm, SearchGrid};
 use nalgebra::Point3;
 use rayon::prelude::*;
+
+// Re-export adaptive timestep from new location for backwards compatibility
+pub use crate::timestepping::{AdaptiveTimestep, compute_adaptive_timestep};
 
 /// Physical properties for an element
 #[derive(Debug, Clone, Copy)]
@@ -267,104 +273,5 @@ pub fn advect_tracers_and_mesh(
     }
 }
 
-/// Adaptive timestepping parameters
-pub struct AdaptiveTimestep {
-    pub dt: f64,              // Computed timestep (seconds)
-    pub cfl_dt: f64,          // CFL-limited timestep (seconds)
-    pub maxwell_dt: f64,      // Maxwell relaxation time limit (seconds)
-    pub max_velocity: f64,    // Maximum velocity magnitude (m/s)
-    pub min_cell_size: f64,   // Minimum cell size (m)
-}
-
-/// Compute adaptive timestep based on CFL and Maxwell constraints
-///
-/// # Arguments
-/// * `mesh` - Computational mesh
-/// * `dof_mgr` - DOF manager for velocity indexing
-/// * `current_sol` - Current solution vector (velocity + pressure)
-/// * `materials` - Material properties for Maxwell time calculation
-/// * `cfl_target` - Target CFL number (typically 0.5)
-/// * `dt_min` - Minimum allowed timestep (seconds)
-/// * `dt_max` - Maximum allowed timestep (seconds)
-/// * `use_cfl_constraint` - Whether to apply CFL constraint
-/// * `use_maxwell_constraint` - Whether to apply Maxwell relaxation constraint
-///
-/// # Returns
-/// AdaptiveTimestep structure with computed dt and diagnostics
-pub fn compute_adaptive_timestep(
-    mesh: &Mesh,
-    dof_mgr: &DofManager,
-    current_sol: &[f64],
-    materials: &[ElastoViscoPlastic],
-    cfl_target: f64,
-    dt_min: f64,
-    dt_max: f64,
-    use_cfl_constraint: bool,
-    use_maxwell_constraint: bool,
-) -> AdaptiveTimestep {
-    // 1. Compute minimum cell size (characteristic length scale)
-    let mut min_cell_size = f64::INFINITY;
-    for elem in &mesh.connectivity.tet10_elements {
-        // Compute element characteristic size (minimum edge length)
-        let nodes = &elem.nodes;
-        for i in 0..4 {
-            for j in (i + 1)..4 {
-                let p1 = &mesh.geometry.nodes[nodes[i]];
-                let p2 = &mesh.geometry.nodes[nodes[j]];
-                let dx = p1.x - p2.x;
-                let dy = p1.y - p2.y;
-                let dz = p1.z - p2.z;
-                let edge_length = (dx * dx + dy * dy + dz * dz).sqrt();
-                min_cell_size = min_cell_size.min(edge_length);
-            }
-        }
-    }
-
-    // 2. Compute maximum velocity magnitude
-    let mut max_velocity: f64 = 0.0;
-    for node_id in 0..mesh.num_nodes() {
-        let vx = current_sol[dof_mgr.velocity_dof(node_id, 0)];
-        let vy = current_sol[dof_mgr.velocity_dof(node_id, 1)];
-        let vz = current_sol[dof_mgr.velocity_dof(node_id, 2)];
-        let v_mag = (vx * vx + vy * vy + vz * vz).sqrt();
-        max_velocity = max_velocity.max(v_mag);
-    }
-
-    // 3. CFL constraint: dt_cfl = CFL * dx / v_max
-    let cfl_dt = if max_velocity > 1e-20 {
-        cfl_target * min_cell_size / max_velocity
-    } else {
-        dt_max // No velocity -> use maximum timestep
-    };
-
-    // 4. Maxwell relaxation time constraint: dt_maxwell = eta / G
-    // Use minimum Maxwell time across all materials
-    let mut min_maxwell_time = f64::INFINITY;
-    for mat in materials {
-        let maxwell_time = mat.viscosity / mat.shear_modulus();
-        min_maxwell_time = min_maxwell_time.min(maxwell_time);
-    }
-    let maxwell_dt = min_maxwell_time; // Full Maxwell time
-
-    // 5. Apply constraints and clamp
-    let mut dt = dt_max;
-
-    if use_cfl_constraint {
-        dt = dt.min(cfl_dt);
-    }
-
-    if use_maxwell_constraint {
-        dt = dt.min(maxwell_dt);
-    }
-
-    // Clamp between min and max
-    dt = dt.max(dt_min).min(dt_max);
-
-    AdaptiveTimestep {
-        dt,
-        cfl_dt,
-        maxwell_dt,
-        max_velocity,
-        min_cell_size,
-    }
-}
+// Adaptive timestep functionality has been moved to crate::timestepping::adaptive
+// See re-export at the top of this file for backwards compatibility

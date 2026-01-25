@@ -505,6 +505,8 @@ mod tests {
             1e23,       // μ = 10^23 Pa·s
             50e6,       // C = 50 MPa
             20.0_f64.to_radians(),  // φ = 20°
+            1e18,       // min_viscosity
+            1e25,       // max_viscosity
         );
 
         // Low strain rate (viscous regime)
@@ -536,7 +538,7 @@ mod tests {
     #[test]
     fn test_evp_is_yielding() {
         let evp = ElastoViscoPlastic::new(
-            100e9, 0.25, 1e23, 50e6, 20.0_f64.to_radians()
+            100e9, 0.25, 1e23, 50e6, 20.0_f64.to_radians(), 1e18, 1e25
         );
 
         // Low deviatoric stress (elastic)
