@@ -24,9 +24,9 @@ output_interval_years = 10_000.0  # 10 kyr (100 Ky / 10 = 10 outputs)
 quality_check_interval_years = 5_000.0  # 5 kyr
 
 [boundary_conditions]
-# Extension rate (m/s), will be ramped up - SAME
-extension_rate_cm_per_year = 1.0
-extension_rate_m_per_s = 3.17e-10  # = 1 cm/yr
+# Extension rate (m/s), will be ramped up - INCREASED for faster rifting
+extension_rate_cm_per_year = 2.0  # Fast rifting (Basin & Range style)
+extension_rate_m_per_s = 6.34e-10  # = 2 cm/yr
 
 # Velocity ramp-up (years) - SHORTER for debugging
 ramp_duration_years = 10_000.0  # 10 kyr (was 100 kyr)
@@ -55,10 +55,10 @@ gravity = 9.81
 depth_top = 0.0
 depth_bottom = 30_000.0  # Full depth
 density = 2700.0
-viscosity = 1.0e21  # Pa·s (middle value)
-cohesion_mpa = 30.0  # Reduced for easier yielding
-cohesion_min_mpa = 4.0
-friction_angle = 30.0
+viscosity = 5.0e20  # Pa·s (temperature-weakened at depth)
+cohesion_mpa = 20.0  # Reduced for easier yielding
+cohesion_min_mpa = 2.0
+friction_angle = 30.0  # Byerlee's law for intact crust
 shear_modulus_pa = 3.0e10
 
 # Lower crust DISABLED (same as upper)
@@ -73,6 +73,7 @@ friction_angle = 30.0
 shear_modulus_pa = 3.0e10
 
 # Weak zone ENABLED for localization
+# Represents a mature detachment fault with low-friction minerals (phyllosilicates)
 [materials.weak_zone]
 enabled = true
 geometry = "dipping_plane"
@@ -83,9 +84,10 @@ depth_max = 20_000.0  # Extend to bottom (domain is 20 km)
 dip_angle = -60.0
 azimuth = 15.0
 half_width = 2_000.0  # Wider zone for easier initialization
-viscosity = 1.0e20  # Lower viscosity for easier deformation
-cohesion_mpa = 20.0  # Reduced for easier yielding
-cohesion_min_mpa = 4.0
+viscosity = 5.0e20  # Moderate - allows stress buildup before yielding
+cohesion_mpa = 3.0  # Low cohesion for easier yielding
+cohesion_min_mpa = 1.0  # Fully weakened after strain softening
+friction_angle = 0.0  # ZERO friction - pure cohesion (von Mises) - extreme case like talc gouge
 initial_plastic_strain = 0.0  # No pre-strain
 
 [time_stepping]

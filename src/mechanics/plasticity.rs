@@ -46,6 +46,10 @@ pub struct DruckerPrager {
     pub friction_min: f64,
     /// Reference plastic strain for softening completion
     pub strain_ref: f64,
+    /// Minimum viscosity cap (Pa·s) - DES3D style
+    pub min_viscosity: f64,
+    /// Maximum viscosity cap (Pa·s) - for stability
+    pub max_viscosity: f64,
 }
 
 impl DruckerPrager {
@@ -73,8 +77,17 @@ impl DruckerPrager {
             smoothing: 1e4, // Default smoothing of 10 kPa
             cohesion_min: cohesion, // No softening by default
             friction_min: friction_angle,
-            strain_ref: 1.0, 
+            strain_ref: 1.0,
+            min_viscosity: 1e18,  // Default: standard floor
+            max_viscosity: 1e30,  // Default: effectively no cap
         }
+    }
+
+    /// Set viscosity bounds (DES3D style)
+    pub fn with_viscosity_bounds(mut self, min_viscosity: f64, max_viscosity: f64) -> Self {
+        self.min_viscosity = min_viscosity;
+        self.max_viscosity = max_viscosity;
+        self
     }
 
     /// Set softening parameters
@@ -216,13 +229,12 @@ impl DruckerPrager {
         // Plastic viscosity: μ_p = τ_y / (2 √J₂(ε̇))
         let mu_plastic = tau_yield / (2.0 * sqrt_j2_edot);
 
-        // Apply minimum viscosity cap (prevent unrealistic low values)
-        // CRITICAL: This controls the viscosity contrast!
-        // With μ_crust ~ 1e23, and FIXED penalty (1e21):
-        //   MIN = 1e18 gives contrast of 1e5 (with fixed penalty, this is OK)
-        //   MIN = 1e20 was too high (no plasticity + ill-conditioned with scaled penalty)
-        const MIN_VISCOSITY: f64 = 1e18;  // 10^18 Pa·s - allows contrast ~1e5
-        mu_plastic.max(MIN_VISCOSITY)
+        // Apply viscosity caps (DES3D style: clamp between min and max)
+        // CRITICAL: This controls the viscosity contrast and can force plastic yielding!
+        // - min_viscosity prevents unrealistic low values
+        // - max_viscosity can force yielding when set to moderate values (e.g., 1e23-1e24)
+        // DES3D approach: Set max_viscosity = 1e24 to guarantee plasticity
+        mu_plastic.clamp(self.min_viscosity, self.max_viscosity)
     }
 
     /// Compute effective plastic viscosity with strain softening
@@ -284,6 +296,12 @@ pub struct ElastoViscoPlastic {
     /// Background viscosity (Pa·s)
     pub viscosity: f64,
 
+    /// Minimum viscosity cap (Pa·s) - DES3D style numerical stabilization
+    pub min_viscosity: f64,
+
+    /// Maximum viscosity cap (Pa·s) - prevents unrealistic values
+    pub max_viscosity: f64,
+
     /// Drucker-Prager yield criterion
     pub plasticity: DruckerPrager,
 }
@@ -296,6 +314,8 @@ impl ElastoViscoPlastic {
         viscosity: f64,
         cohesion: f64,
         friction_angle: f64,
+        min_viscosity: f64,
+        max_viscosity: f64,
     ) -> Self {
         assert!(youngs_modulus > 0.0, "E must be positive");
         assert!(
@@ -303,11 +323,15 @@ impl ElastoViscoPlastic {
             "ν must be in [-1, 0.5)"
         );
         assert!(viscosity > 0.0, "μ must be positive");
+        assert!(min_viscosity > 0.0, "min_viscosity must be positive");
+        assert!(max_viscosity >= min_viscosity, "max_viscosity must be >= min_viscosity");
 
         Self {
             youngs_modulus,
             poisson_ratio,
             viscosity,
+            min_viscosity,
+            max_viscosity,
             plasticity: DruckerPrager::new(cohesion, friction_angle),
         }
     }

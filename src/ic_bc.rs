@@ -166,6 +166,8 @@ pub fn get_material_properties(
             cohesion_min: config.materials.upper_crust.cohesion_min_mpa * 1e6,
             friction_angle: config.materials.upper_crust.friction_angle.to_radians(),
             shear_modulus: config.materials.upper_crust.shear_modulus_pa,
+            min_viscosity: config.materials.upper_crust.min_viscosity,
+            max_viscosity: config.materials.upper_crust.max_viscosity,
         },
         1 => MaterialProps {
             viscosity: config.materials.lower_crust.viscosity,
@@ -174,6 +176,8 @@ pub fn get_material_properties(
             cohesion_min: config.materials.lower_crust.cohesion_min_mpa * 1e6,
             friction_angle: config.materials.lower_crust.friction_angle.to_radians(),
             shear_modulus: config.materials.lower_crust.shear_modulus_pa,
+            min_viscosity: config.materials.lower_crust.min_viscosity,
+            max_viscosity: config.materials.lower_crust.max_viscosity,
         },
         2 => MaterialProps {
             viscosity: config.materials.weak_zone.viscosity,
@@ -182,6 +186,8 @@ pub fn get_material_properties(
             cohesion_min: config.materials.weak_zone.cohesion_min_mpa * 1e6,
             friction_angle: config.materials.lower_crust.friction_angle.to_radians(),
             shear_modulus: config.materials.lower_crust.shear_modulus_pa,
+            min_viscosity: config.materials.weak_zone.min_viscosity,
+            max_viscosity: config.materials.weak_zone.max_viscosity,
         },
         _ => {
             eprintln!("WARNING: Unknown material ID {}, using lower crust", mat_id);
@@ -199,6 +205,8 @@ pub struct MaterialProps {
     pub cohesion_min: f64,
     pub friction_angle: f64,
     pub shear_modulus: f64,
+    pub min_viscosity: f64,
+    pub max_viscosity: f64,
 }
 
 /// Print BC summary

@@ -481,32 +481,32 @@ impl VtkWriter {
         writeln!(file, "\n        </DataArray>")?;
         writeln!(file, "      </Cells>")?;
 
-        // Tracer Data
+        // Tracer Data (renamed to avoid conflicts with mesh CellData)
         writeln!(file, "      <PointData>")?;
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"MaterialID\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"MaterialID_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &id in &tracers.material_id { write!(file, "{} ", id)?; }
         writeln!(file, "\n        </DataArray>")?;
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticStrain\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticStrain_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &eps in &tracers.plastic_strain { write!(file, "{} ", eps)?; }
         writeln!(file, "\n        </DataArray>")?;
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Stress_II\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Stress_II_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &val in &tracers.stress_ii { write!(file, "{} ", val)?; }
         writeln!(file, "\n        </DataArray>")?;
 
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"StrainRate_II\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"StrainRate_II_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &val in &tracers.strain_rate_ii { write!(file, "{} ", val)?; }
         writeln!(file, "\n        </DataArray>")?;
 
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Viscosity\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Viscosity_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &val in &tracers.viscosity { write!(file, "{} ", val)?; }
         writeln!(file, "\n        </DataArray>")?;
 
-        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Pressure\" format=\"ascii\">")?;
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Pressure_Tracer\" format=\"ascii\">")?;
         write!(file, "          ")?;
         for &val in &tracers.pressure { write!(file, "{} ", val)?; }
         writeln!(file, "\n        </DataArray>")?;
@@ -522,6 +522,264 @@ impl VtkWriter {
 
         writeln!(file, "    </Piece>")?;
 
+        writeln!(file, "  </UnstructuredGrid>")?;
+        writeln!(file, "</VTKFile>")?;
+
+        Ok(())
+    }
+
+    /// Write mesh with nodal (PointData) output - converts CellData to nodes by averaging
+    /// This avoids ParaView issues with multi-block files and makes all fields easily visible
+    pub fn write_nodal_vtu(mesh: &Mesh, _tracers: &TracerSwarm, filename: &str) -> io::Result<()> {
+        let mut file = File::create(filename)?;
+
+        // XML header
+        writeln!(file, "<?xml version=\"1.0\"?>")?;
+        writeln!(file, "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\">")?;
+        writeln!(file, "  <UnstructuredGrid>")?;
+        writeln!(file, "    <Piece NumberOfPoints=\"{}\" NumberOfCells=\"{}\">",
+                 mesh.num_nodes(), mesh.num_elements())?;
+
+        // Points
+        writeln!(file, "      <Points>")?;
+        writeln!(file, "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">")?;
+        for node in &mesh.geometry.nodes {
+            writeln!(file, "          {} {} {}", node.x, node.y, node.z)?;
+        }
+        writeln!(file, "        </DataArray>")?;
+        writeln!(file, "      </Points>")?;
+
+        // Cells
+        writeln!(file, "      <Cells>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for elem in &mesh.connectivity.tet10_elements {
+            for &node_idx in &elem.nodes {
+                write!(file, "{} ", node_idx)?;
+            }
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for i in 1..=mesh.num_elements() {
+            write!(file, "{} ", i * 10)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for _ in 0..mesh.num_elements() {
+            write!(file, "24 ")?; // VTK_QUADRATIC_TETRA
+        }
+        writeln!(file, "\n        </DataArray>")?;
+        writeln!(file, "      </Cells>")?;
+
+        // Convert CellData to PointData by averaging
+        let num_nodes = mesh.num_nodes();
+
+        // Initialize nodal arrays
+        let mut nodal_plastic_strain = vec![0.0; num_nodes];
+        let mut nodal_stress = vec![0.0; num_nodes];
+        let mut nodal_strain_rate = vec![0.0; num_nodes];
+        let mut nodal_pressure = vec![0.0; num_nodes];
+        let mut nodal_viscosity = vec![0.0; num_nodes];
+        let mut nodal_is_yielding = vec![0.0; num_nodes];
+        let mut nodal_yield_stress = vec![0.0; num_nodes];
+        let mut nodal_plastic_visc = vec![0.0; num_nodes];
+        let mut nodal_cohesion = vec![0.0; num_nodes];
+        let mut nodal_count = vec![0; num_nodes];
+
+        // Average cell data to nodes
+        if let Some(ps_field) = mesh.cell_data.get_field("PlasticStrain") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = ps_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_plastic_strain[node_id] += value;
+                    nodal_count[node_id] += 1;
+                }
+            }
+        }
+
+        if let Some(stress_field) = mesh.cell_data.get_field("Stress_II") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = stress_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_stress[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(sr_field) = mesh.cell_data.get_field("StrainRate_II") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = sr_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_strain_rate[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(p_field) = mesh.cell_data.get_field("Pressure") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = p_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_pressure[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(visc_field) = mesh.cell_data.get_field("Viscosity") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = visc_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_viscosity[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(yield_field) = mesh.cell_data.get_field("IsYielding") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = yield_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_is_yielding[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(ys_field) = mesh.cell_data.get_field("YieldStress") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = ys_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_yield_stress[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(pv_field) = mesh.cell_data.get_field("PlasticViscosity") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = pv_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_plastic_visc[node_id] += value;
+                }
+            }
+        }
+
+        if let Some(coh_field) = mesh.cell_data.get_field("SoftenedCohesion") {
+            for (elem_id, elem) in mesh.connectivity.tet10_elements.iter().enumerate() {
+                let value = coh_field.data[elem_id];
+                for &node_id in &elem.nodes {
+                    nodal_cohesion[node_id] += value;
+                }
+            }
+        }
+
+        // Average by dividing by count
+        for i in 0..num_nodes {
+            if nodal_count[i] > 0 {
+                let count = nodal_count[i] as f64;
+                nodal_plastic_strain[i] /= count;
+                nodal_stress[i] /= count;
+                nodal_strain_rate[i] /= count;
+                nodal_pressure[i] /= count;
+                nodal_viscosity[i] /= count;
+                nodal_is_yielding[i] /= count;
+                nodal_yield_stress[i] /= count;
+                nodal_plastic_visc[i] /= count;
+                nodal_cohesion[i] /= count;
+            }
+        }
+
+        // Write PointData
+        writeln!(file, "      <PointData>")?;
+
+        // Velocity (already nodal from mesh.field_data)
+        for field_name in mesh.field_data.vector_field_names() {
+            if let Some(field) = mesh.field_data.get_vector_field(field_name) {
+                writeln!(file, "        <DataArray type=\"Float64\" Name=\"{}\" NumberOfComponents=\"3\" format=\"ascii\">", field.name)?;
+                for vec in &field.data {
+                    writeln!(file, "          {} {} {}", vec.x, vec.y, vec.z)?;
+                }
+                writeln!(file, "        </DataArray>")?;
+            }
+        }
+
+        // Scalar fields from mesh.field_data
+        for field_name in mesh.field_data.field_names() {
+            if let Some(field) = mesh.field_data.get_field(field_name) {
+                writeln!(file, "        <DataArray type=\"Float64\" Name=\"{}\" format=\"ascii\">", field.name)?;
+                write!(file, "          ")?;
+                for &value in &field.data {
+                    write!(file, "{} ", value)?;
+                }
+                writeln!(file, "\n        </DataArray>")?;
+            }
+        }
+
+        // Converted nodal fields
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticStrain\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_plastic_strain {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Stress_II\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_stress {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"StrainRate_II\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_strain_rate {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Pressure\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_pressure {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"Viscosity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_viscosity {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"IsYielding\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_is_yielding {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"YieldStress\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_yield_stress {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"PlasticViscosity\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_plastic_visc {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "        <DataArray type=\"Float64\" Name=\"SoftenedCohesion\" format=\"ascii\">")?;
+        write!(file, "          ")?;
+        for &value in &nodal_cohesion {
+            write!(file, "{} ", value)?;
+        }
+        writeln!(file, "\n        </DataArray>")?;
+
+        writeln!(file, "      </PointData>")?;
+
+        writeln!(file, "    </Piece>")?;
         writeln!(file, "  </UnstructuredGrid>")?;
         writeln!(file, "</VTKFile>")?;
 

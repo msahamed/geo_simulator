@@ -91,7 +91,14 @@ pub struct MaterialProperties {
     pub cohesion_min_mpa: f64,
     pub friction_angle: f64,
     pub shear_modulus_pa: f64,
+    #[serde(default = "default_min_viscosity")]
+    pub min_viscosity: f64,  // Minimum viscosity cap (Pa·s) - DES3D style
+    #[serde(default = "default_max_viscosity")]
+    pub max_viscosity: f64,  // Maximum viscosity cap (Pa·s) - for stability
 }
+
+fn default_min_viscosity() -> f64 { 1e18 }
+fn default_max_viscosity() -> f64 { 1e30 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WeakZoneConfig {
@@ -107,7 +114,13 @@ pub struct WeakZoneConfig {
     pub viscosity: f64,
     pub cohesion_mpa: f64,
     pub cohesion_min_mpa: f64,
-    pub initial_plastic_strain: f64,
+    pub friction_angle: f64,  // Friction angle in degrees (lower for weak detachments)
+    #[serde(default = "default_min_viscosity")]
+    pub min_viscosity: f64,  // Minimum viscosity cap (Pa·s) - DES3D style
+    #[serde(default = "default_max_viscosity")]
+    pub max_viscosity: f64,  // Maximum viscosity cap (Pa·s) - for stability
+    #[serde(default)]
+    pub initial_plastic_strain: f64,  // Pre-damage (0.0-1.0)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

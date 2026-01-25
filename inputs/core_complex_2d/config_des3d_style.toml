@@ -1,0 +1,170 @@
+# DES3D-STYLE CONFIG: Numerical Stabilization for Plastic Yielding
+# Purpose: Match DES3D approach with elevated min_viscosity to force plasticity
+# Units: SI (m, s, Pa, kg) unless otherwise specified
+# Reference: DES3D core_complex example
+
+[domain]
+# Domain size (meters) - Matching DES3D
+lx = 100_000.0  # 100 km
+ly = 10_000.0   # 10 km (true 3D, not quasi-2D)
+lz = 10_000.0   # 10 km
+
+# Mesh resolution (meters)
+dx = 5_000.0    # 5 km (finer than debug)
+dy = 5_000.0    # 5 km
+dz = 2_500.0    # 2.5 km
+
+[simulation]
+# Total simulation time (years)
+total_time_years = 2_000_000.0  # 2 Myr (extended for better fault visualization)
+
+# Output frequency (years)
+output_interval_years = 50_000.0  # 50 kyr (fewer outputs for longer run)
+
+# Mesh quality check interval (years)
+quality_check_interval_years = 5_000.0
+
+[boundary_conditions]
+# Extension rate (m/s) - Matching DES3D
+extension_rate_cm_per_year = 3.15  # ≈ π cm/yr
+extension_rate_m_per_s = 1.0e-9    # DES3D value
+
+# Velocity ramp-up (years)
+ramp_duration_years = 50_000.0  # Gradual spin-up
+
+# Boundary types
+bc_x0 = "velocity"        # Left: vx = -v_ext
+bc_x1 = "velocity"        # Right: vx = +v_ext
+bc_y0 = "plane_strain"    # Back: vy = 0
+bc_y1 = "plane_strain"    # Front: vy = 0
+bc_z0 = "free_surface"    # Top: free surface
+bc_z1 = "fixed_normal"    # Bottom: vz = 0
+
+[initial_conditions]
+# Temperature field
+surface_temp_kelvin = 273.0
+moho_temp_kelvin = 873.0
+use_geotherm = true
+
+# Stress state
+use_lithostatic_pressure = true
+gravity = 9.81
+
+[materials]
+# Upper crust - Standard crustal properties
+[materials.upper_crust]
+depth_top = 0.0
+depth_bottom = 30_000.0
+density = 2700.0
+viscosity = 1.0e21         # Background viscosity (not critical with DES3D approach)
+cohesion_mpa = 44.0        # DES3D initial cohesion
+cohesion_min_mpa = 4.0     # DES3D softened cohesion (10x reduction)
+friction_angle = 30.0      # DES3D value (Byerlee's law)
+shear_modulus_pa = 3.0e10  # 30 GPa (DES3D value)
+
+# DES3D-style viscosity caps
+min_viscosity = 1.0e18     # Standard floor
+max_viscosity = 1.0e24     # DES3D value - FORCES PLASTIC YIELDING!
+
+# Lower crust - Same as upper for simplicity
+[materials.lower_crust]
+depth_top = 30_000.0
+depth_bottom = 30_000.0    # Zero thickness = disabled
+density = 2700.0
+viscosity = 1.0e21
+cohesion_mpa = 44.0
+cohesion_min_mpa = 4.0
+friction_angle = 30.0
+shear_modulus_pa = 3.0e10
+min_viscosity = 1.0e18
+max_viscosity = 1.0e24
+
+# Weak zone - DES3D style with pre-damage and elevated viscosity floor
+[materials.weak_zone]
+enabled = true
+geometry = "dipping_plane"
+x_center = 50_000.0        # Center of domain
+y_center = 5_000.0         # Center of Y (true 3D)
+depth_min = 5_000.0        # Start at 5 km depth (DES3D: 0.5 normalized = 5km)
+depth_max = 10_000.0       # Extend to bottom (DES3D: 1.0 normalized = 10km)
+dip_angle = -60.0          # DES3D value
+azimuth = 15.0             # DES3D value
+half_width = 1_200.0       # 1.2 km (DES3D: 1.2 normalized)
+
+viscosity = 1.0e21         # Background (not critical)
+cohesion_mpa = 44.0        # Initial cohesion (DES3D)
+cohesion_min_mpa = 4.0     # Softened cohesion (DES3D: 10x reduction)
+friction_angle = 30.0      # DES3D value (keep pressure dependence)
+
+# DES3D-style numerical stabilization
+min_viscosity = 1.0e18     # Standard floor
+max_viscosity = 1.0e24     # DES3D value - CRITICAL for forcing plasticity!
+
+# Pre-damage (DES3D: weakzone_plstrain = 0.5)
+initial_plastic_strain = 0.5  # 50% pre-damage (DES3D value)
+
+[time_stepping]
+# Adaptive time stepping
+use_adaptive = true
+
+# Time step limits (years) - Conservative for stability
+dt_min_years = 100.0       # Minimum
+dt_max_years = 3000.0      # Reduced from 5000 to 3000 for better convergence
+dt_initial_years = 500.0   # Reduced from 1000 to start more conservatively
+
+# CFL condition
+cfl_target = 0.3           # Reduced from 0.5 for better stability
+
+# Constraints
+use_cfl_constraint = true
+use_maxwell_constraint = false
+use_mesh_quality_constraint = true
+
+[solver]
+# Non-linear solver (Picard is more stable for plasticity than JFNK in this code)
+nonlinear_solver = "Picard"
+max_nonlinear_iterations = 50  # Increased from 20 to handle strong plasticity
+nonlinear_tolerance = 1.0e-3   # Relaxed from 5e-4 for stability
+nonlinear_abs_tolerance = 1.0e-6  # Relaxed slightly
+
+# Linear solver
+linear_solver = "GMRES"
+gmres_restart = 200
+gmres_max_iterations = 8000
+gmres_tolerance = 5.0e-3
+gmres_abs_tolerance = 1.0e-8
+
+# Preconditioner
+use_picard_warmstart = false
+picard_warmstart_iterations = 0
+
+# Scaling
+use_nondimensionalization = true
+
+[tracers]
+# Passive tracers for visualization
+tracers_per_element = 4
+total_tracers = 1920  # Will be computed from elements
+
+[output]
+# Output format
+format = "VTK"
+output_dir = "./output/des3d_style"
+
+# Fields to save
+save_velocity = true
+save_pressure = true
+save_stress = true
+save_strain = true
+save_material_id = true
+save_tracers = true
+
+[physics]
+# Enable/disable physics
+gravity_enabled = true
+surface_processes_enabled = false
+thermal_diffusion_enabled = false
+winkler_foundation_enabled = false
+
+# Surface diffusion
+surface_diffusion_kappa = 1.0e-7  # DES3D value (1e-7 m²/yr)

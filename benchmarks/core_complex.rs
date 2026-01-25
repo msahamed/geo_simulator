@@ -166,8 +166,10 @@ fn main() {
             viscosity: config.materials.weak_zone.viscosity,
             cohesion: config.materials.weak_zone.cohesion_mpa * 1e6,
             cohesion_min: config.materials.weak_zone.cohesion_min_mpa * 1e6,
-            friction_angle: mat_lower.friction_angle,
+            friction_angle: config.materials.weak_zone.friction_angle.to_radians(),
             shear_modulus: mat_lower.shear_modulus,
+            min_viscosity: config.materials.weak_zone.min_viscosity,
+            max_viscosity: config.materials.weak_zone.max_viscosity,
         }
     } else {
         mat_lower  // Use lower crust properties if weak zone disabled
@@ -175,13 +177,16 @@ fn main() {
 
     let materials = vec![
         // Material 0: Upper crust
-        ElastoViscoPlastic::new(100e9, 0.25, mat_upper.viscosity, mat_upper.cohesion, mat_upper.friction_angle)
+        ElastoViscoPlastic::new(100e9, 0.25, mat_upper.viscosity, mat_upper.cohesion, mat_upper.friction_angle,
+                                mat_upper.min_viscosity, mat_upper.max_viscosity)
             .with_softening(mat_upper.cohesion_min, 0.5, 0.5),
         // Material 1: Lower crust
-        ElastoViscoPlastic::new(100e9, 0.25, mat_lower.viscosity, mat_lower.cohesion, mat_lower.friction_angle)
+        ElastoViscoPlastic::new(100e9, 0.25, mat_lower.viscosity, mat_lower.cohesion, mat_lower.friction_angle,
+                                mat_lower.min_viscosity, mat_lower.max_viscosity)
             .with_softening(mat_lower.cohesion_min, 0.5, 0.5),
         // Material 2: Weak zone (or lower crust if disabled)
-        ElastoViscoPlastic::new(100e9, 0.25, mat_weak.viscosity, mat_weak.cohesion, mat_weak.friction_angle)
+        ElastoViscoPlastic::new(100e9, 0.25, mat_weak.viscosity, mat_weak.cohesion, mat_weak.friction_angle,
+                                mat_weak.min_viscosity, mat_weak.max_viscosity)
             .with_softening(mat_weak.cohesion_min, 0.5, 0.5),
     ];
 
@@ -322,7 +327,7 @@ fn main() {
         viz_mesh.cell_data.add_field(ScalarField::new("PlasticViscosity", vec![1e30; n_elements]));
 
         let ic_filename = format!("{}/step_0000.vtu", config.output.output_dir);
-        VtkWriter::write_combined_vtu(&viz_mesh, &swarm, &ic_filename).unwrap();
+        VtkWriter::write_nodal_vtu(&viz_mesh, &swarm, &ic_filename).unwrap();
     }
 
     println!("  ✓ Written: {}/step_0000.vtu", config.output.output_dir);
@@ -373,12 +378,12 @@ fn main() {
 
         // 3. Setup Picard Iteration solver
 
-        // Picard config: Use working parameters from picard_simple.rs
+        // Picard config: Use config file values for better control
         let picard_config = PicardConfig {
-            max_iterations: 30,      // Sufficient for convergence
-            tolerance: 5e-4,         // Relative change tolerance
+            max_iterations: config.solver.max_nonlinear_iterations as usize,
+            tolerance: config.solver.nonlinear_tolerance,
             relaxation: 0.5,         // Conservative (CRITICAL for stability)
-            abs_tolerance: 1e-15,    // Absolute tolerance guard
+            abs_tolerance: config.solver.nonlinear_abs_tolerance,
         };
 
         // Linear solver: GMRES - use working parameters
@@ -707,7 +712,8 @@ fn main() {
             viz_mesh.cell_data.add_field(ScalarField::new("SoftenedCohesion", softened_cohesion.clone()));
             viz_mesh.cell_data.add_field(ScalarField::new("PlasticViscosity", plastic_viscosity.clone()));
 
-            VtkWriter::write_combined_vtu(&viz_mesh, &swarm, &filename).unwrap();
+            // Use nodal output (all data on nodes, no multi-block) for better ParaView compatibility
+            VtkWriter::write_nodal_vtu(&viz_mesh, &swarm, &filename).unwrap();
         }
 
         // Advance time and step counter
