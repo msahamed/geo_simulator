@@ -9,7 +9,7 @@ use geo_simulator::{
     compute_element_properties, compute_visualization_fields, update_tracer_properties, advect_tracers_and_mesh,
 };
 use geo_simulator::linalg::preconditioner::{ILUPreconditioner, IdentityPreconditioner, BlockDiagonalPreconditioner, JacobiPreconditioner};
-use geo_simulator::bc::setup_boundary_conditions;
+// BC setup now done manually with pre-identified nodes (see line ~350)
 use geo_simulator::ic::{initialize_lithostatic_pressure, initialize_extension_velocity, get_gravity_vector, setup_initial_tracers, get_material_properties, MaterialProps};
 use geo_simulator::utils::units::{years_to_seconds, seconds_to_years};
 use geo_simulator::timestepping::compute_adaptive_timestep;
@@ -202,7 +202,7 @@ fn main() {
     for (node_id, node) in mesh.geometry.nodes.iter().enumerate() {
         if node.x < tol { left_nodes.push(node_id); }
         if (node.x - lx).abs() < tol { right_nodes.push(node_id); }
-        if node.z < tol { bottom_nodes.push(node_id); }
+        if (node.z - lz).abs() < tol { bottom_nodes.push(node_id); }  // z≈lz is BOTTOM
         if node.y < tol { back_nodes.push(node_id); }
         if (node.y - ly).abs() < tol { front_nodes.push(node_id); }
     }
@@ -352,13 +352,43 @@ fn main() {
         // 1. Setup BCs for current mesh state
         let mut dof_mgr = DofManager::new_mixed(mesh.num_nodes(), &mesh.connectivity.corner_nodes());
 
-        // Apply boundary conditions from config
-        // Use current time for ramp-up (config specifies ramp duration)
-        setup_boundary_conditions(&config, &mesh, &mut dof_mgr, current_time_years);
+        // Apply boundary conditions using PRE-IDENTIFIED node lists
+        // CRITICAL FIX: Node IDs remain valid even after mesh deforms
+        // (Previously used setup_boundary_conditions which re-identifies by position - WRONG!)
+        let v_max = config.boundary_conditions.extension_rate_m_per_s;
+        let ramp_duration = config.boundary_conditions.ramp_duration_years;
+        let ramp_fraction = if current_time_years < ramp_duration {
+            current_time_years / ramp_duration
+        } else {
+            1.0
+        };
+        let v_current = v_max * ramp_fraction;
+
+        // X-boundaries: Extension (pull apart)
+        for &node_id in &left_nodes {
+            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), -v_current);
+        }
+        for &node_id in &right_nodes {
+            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), v_current);
+        }
+
+        // Y-boundaries: Plane strain (vy = 0)
+        for &node_id in &back_nodes {
+            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0);
+        }
+        for &node_id in &front_nodes {
+            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0);
+        }
+
+        // Z-bottom: Fixed normal (vz = 0)
+        for &node_id in &bottom_nodes {
+            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 2), 0.0);
+        }
+        // Z-top is free surface (no BCs)
 
         if step < 20 && verbose {
-            let ramp_fraction = current_time_years / config.boundary_conditions.ramp_duration_years;
-            println!("    Apply Velocity Ramp: {:.1}% (t = {:.1} kyr)", ramp_fraction * 100.0, current_time_years / 1000.0);
+            println!("    Apply Velocity Ramp: {:.1}% (t = {:.1} kyr, v = {:.2e} m/s)",
+                     ramp_fraction * 100.0, current_time_years / 1000.0, v_current);
         }
 
         // Pin one pressure DOF to remove the constant pressure null space
@@ -377,12 +407,22 @@ fn main() {
 
         // 3. Setup Picard Iteration solver
 
-        // Picard config: Use config file values for better control
+        // Picard config: BOTH Fixed Anderson + Adaptive Damping
+        // Using CORRECTED Anderson (current-relative formulation)
+        // Using LESS AGGRESSIVE adaptive damping to avoid operator instability
         let picard_config = PicardConfig {
             max_iterations: config.solver.max_nonlinear_iterations as usize,
             tolerance: config.solver.nonlinear_tolerance,
-            relaxation: 0.5,         // Conservative (CRITICAL for stability)
+            relaxation: 0.7,            // Starting value for adaptive damping
             abs_tolerance: config.solver.nonlinear_abs_tolerance,
+            use_anderson: true,         // ENABLE with fixed math
+            anderson_depth: 5,
+            anderson_beta: 1e-8,
+            use_adaptive_damping: true, // ENABLE with conservative parameters
+            alpha_min: 0.3,             // Higher minimum (was 0.05)
+            alpha_max: 0.8,             // Reasonable maximum
+            damping_reduction: 0.85,    // Less aggressive reduction (was 0.6)
+            damping_increase: 1.02,     // Slow recovery
         };
 
         // Linear solver: GMRES - use working parameters

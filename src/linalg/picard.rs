@@ -31,7 +31,7 @@
 /// - Glerum et al. (2018), "Nonlinear viscoplasticity in ASPECT"
 
 use sprs::CsMat;
-use crate::linalg::{Solver, SolverStats};
+use crate::linalg::{Solver, SolverStats, AndersonAccelerator};
 
 /// Configuration for Picard iteration
 #[derive(Debug, Clone)]
@@ -51,6 +51,34 @@ pub struct PicardConfig {
     /// Absolute tolerance for very small velocities (m/s)
     /// Prevents division by zero in relative tolerance
     pub abs_tolerance: f64,
+
+    /// Enable Anderson Acceleration
+    /// Dramatically improves convergence for oscillating problems (2-10x speedup)
+    pub use_anderson: bool,
+
+    /// Anderson acceleration depth (number of previous iterates to store)
+    /// Typical values: 3-5. Higher = more memory but better acceleration
+    pub anderson_depth: usize,
+
+    /// Anderson regularization parameter (prevents ill-conditioning)
+    /// Typical values: 1e-10 to 1e-6
+    pub anderson_beta: f64,
+
+    /// Enable adaptive damping (auto-reduce relaxation on oscillations)
+    /// Works independently and complements Anderson acceleration
+    pub use_adaptive_damping: bool,
+
+    /// Minimum relaxation parameter (lower bound for adaptive damping)
+    pub alpha_min: f64,
+
+    /// Maximum relaxation parameter (upper bound for adaptive damping)
+    pub alpha_max: f64,
+
+    /// Damping reduction factor when oscillation detected
+    pub damping_reduction: f64,
+
+    /// Damping increase factor when converging well
+    pub damping_increase: f64,
 }
 
 impl Default for PicardConfig {
@@ -60,6 +88,14 @@ impl Default for PicardConfig {
             tolerance: 1e-3,  // 0.1% relative change
             relaxation: 0.7,   // Moderate under-relaxation
             abs_tolerance: 1e-15,  // ~1 nm/s
+            use_anderson: false,  // Disabled by default for backwards compatibility
+            anderson_depth: 3,
+            anderson_beta: 1e-8,
+            use_adaptive_damping: false,  // Disabled by default
+            alpha_min: 0.1,
+            alpha_max: 0.9,
+            damping_reduction: 0.7,  // Reduce by 30% on oscillation
+            damping_increase: 1.05,   // Increase by 5% when converging well
         }
     }
 }
@@ -72,6 +108,14 @@ impl PicardConfig {
             tolerance: 1e-4,
             relaxation: 0.5,
             abs_tolerance: 1e-15,
+            use_anderson: false,
+            anderson_depth: 3,
+            anderson_beta: 1e-8,
+            use_adaptive_damping: false,
+            alpha_min: 0.1,
+            alpha_max: 0.9,
+            damping_reduction: 0.7,
+            damping_increase: 1.05,
         }
     }
 
@@ -82,6 +126,50 @@ impl PicardConfig {
             tolerance: 1e-2,
             relaxation: 0.8,
             abs_tolerance: 1e-15,
+            use_anderson: false,
+            anderson_depth: 3,
+            anderson_beta: 1e-8,
+            use_adaptive_damping: false,
+            alpha_min: 0.1,
+            alpha_max: 0.9,
+            damping_reduction: 0.7,
+            damping_increase: 1.05,
+        }
+    }
+
+    /// Create Anderson-accelerated config (recommended for oscillating problems)
+    pub fn with_anderson() -> Self {
+        Self {
+            max_iterations: 30,
+            tolerance: 1e-3,
+            relaxation: 0.5,  // Still use relaxation with Anderson
+            abs_tolerance: 1e-15,
+            use_anderson: true,
+            anderson_depth: 5,  // Deeper history for better acceleration
+            anderson_beta: 1e-8,
+            use_adaptive_damping: true,  // Also use adaptive damping as safety net
+            alpha_min: 0.1,
+            alpha_max: 0.7,
+            damping_reduction: 0.7,
+            damping_increase: 1.02,  // Conservative increase
+        }
+    }
+
+    /// Create config with both Anderson and Adaptive Damping (most robust)
+    pub fn robust() -> Self {
+        Self {
+            max_iterations: 50,
+            tolerance: 1e-3,
+            relaxation: 0.5,
+            abs_tolerance: 1e-15,
+            use_anderson: true,
+            anderson_depth: 5,
+            anderson_beta: 1e-8,
+            use_adaptive_damping: true,
+            alpha_min: 0.05,  // Can go very conservative
+            alpha_max: 0.7,
+            damping_reduction: 0.6,  // Aggressive reduction
+            damping_increase: 1.01,  // Very conservative increase
         }
     }
 }
@@ -159,6 +247,18 @@ where
     let mut total_linear_iters = 0;
     let mut last_linear_stats = SolverStats::new();
 
+    // Initialize Anderson accelerator if enabled
+    let mut anderson = if config.use_anderson {
+        Some(AndersonAccelerator::new(config.anderson_depth, config.anderson_beta)
+            .with_verbose(false))
+    } else {
+        None
+    };
+
+    // Adaptive damping state
+    let mut current_alpha = config.relaxation;
+    let mut residual_history: Vec<f64> = Vec::new();
+
     for picard_iter in 0..config.max_iterations {
         // 1. Assemble K and f using current velocity
         let (k_mat, f) = assembler(&velocity_prev);
@@ -206,12 +306,33 @@ where
             );
         }
 
-        // 4. Under-relaxation
-        let mut velocity_relaxed = vec![0.0; n_dofs];
-        for i in 0..n_dofs {
-            velocity_relaxed[i] = config.relaxation * velocity_new[i]
-                + (1.0 - config.relaxation) * velocity_prev[i];
-        }
+        // 4. Under-relaxation (with optional Anderson Acceleration and adaptive damping)
+        let alpha = current_alpha;  // Use adaptive alpha if damping is enabled
+
+        let velocity_relaxed = if let Some(ref mut aa) = anderson {
+            // Anderson Acceleration:
+            // Treat Picard as fixed-point: x^{k+1} = F(x^k)
+            // where F includes both linear solve AND relaxation
+
+            // Apply standard relaxation first (with adaptive alpha)
+            let mut velocity_relaxed_std = vec![0.0; n_dofs];
+            for i in 0..n_dofs {
+                velocity_relaxed_std[i] = alpha * velocity_new[i]
+                    + (1.0 - alpha) * velocity_prev[i];
+            }
+
+            // Use Anderson to accelerate the relaxed update
+            // x^k = velocity_prev, F(x^k) = velocity_relaxed_std
+            aa.accelerate(&velocity_prev, &velocity_relaxed_std)
+        } else {
+            // Standard relaxation (no Anderson)
+            let mut velocity_relaxed = vec![0.0; n_dofs];
+            for i in 0..n_dofs {
+                velocity_relaxed[i] = alpha * velocity_new[i]
+                    + (1.0 - alpha) * velocity_prev[i];
+            }
+            velocity_relaxed
+        };
 
         // 5. Compute convergence criterion: ||Δu||/||u||
         let mut delta_norm_sq = 0.0;
@@ -233,6 +354,52 @@ where
             // Velocity very small - use absolute criterion
             delta_norm / config.abs_tolerance
         };
+
+        // Adaptive Damping: Adjust relaxation based on convergence behavior
+        if config.use_adaptive_damping && picard_iter > 0 {
+            residual_history.push(relative_change);
+
+            // Detect oscillation: residual increasing after decreasing
+            if residual_history.len() >= 2 {
+                let n = residual_history.len();
+                let r_curr = residual_history[n - 1];
+                let r_prev = residual_history[n - 2];
+
+                // Check for multiple oscillation patterns
+                let is_oscillating = if n >= 3 {
+                    let r_prev2 = residual_history[n - 3];
+                    // Pattern 1: Residual increased
+                    let increased = r_curr > r_prev * 1.2;
+                    // Pattern 2: Zig-zag pattern (residual went down then up)
+                    let zigzag = r_prev < r_prev2 && r_curr > r_prev;
+                    increased || zigzag
+                } else {
+                    // Simple increase check
+                    r_curr > r_prev * 1.2
+                };
+
+                if is_oscillating {
+                    let old_alpha = current_alpha;
+                    current_alpha *= config.damping_reduction;
+                    current_alpha = current_alpha.max(config.alpha_min);
+
+                    if (old_alpha - current_alpha).abs() > 1e-10 {
+                        println!("    [Adaptive] Oscillation detected, reducing α: {:.3} → {:.3}",
+                                 old_alpha, current_alpha);
+                    }
+                } else if r_curr < r_prev * 0.9 {
+                    // Converging well - slowly increase alpha
+                    let old_alpha = current_alpha;
+                    current_alpha *= config.damping_increase;
+                    current_alpha = current_alpha.min(config.alpha_max);
+
+                    if picard_iter % 5 == 0 && (current_alpha - old_alpha).abs() > 1e-10 {
+                        println!("    [Adaptive] Good convergence, increasing α: {:.3} → {:.3}",
+                                 old_alpha, current_alpha);
+                    }
+                }
+            }
+        }
 
         // 6. Check convergence
         let converged = relative_change < config.tolerance;
