@@ -68,10 +68,8 @@ echo ""
 echo -e "${YELLOW}[1/4] Setting up directories...${NC}"
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/visualizations"
-mkdir -p "$OUTPUT_DIR/logs"
 echo -e "  ✓ Created: $OUTPUT_DIR"
 echo -e "  ✓ Created: $OUTPUT_DIR/visualizations"
-echo -e "  ✓ Created: $OUTPUT_DIR/logs"
 echo ""
 
 # Step 2: Clean previous files
