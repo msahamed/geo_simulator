@@ -63,6 +63,14 @@ pub struct BoundaryConditions {
     pub bc_y1: String,
     pub bc_z0: String,
     pub bc_z1: String,
+
+    /// Explicit boundary values (optional override)
+    pub bc_val_x0: Option<f64>,
+    pub bc_val_x1: Option<f64>,
+    pub bc_val_y0: Option<f64>,
+    pub bc_val_y1: Option<f64>,
+    pub bc_val_z0: Option<f64>,
+    pub bc_val_z1: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -355,6 +355,7 @@ fn main() {
         // Apply boundary conditions using PRE-IDENTIFIED node lists
         // CRITICAL FIX: Node IDs remain valid even after mesh deforms
         // (Previously used setup_boundary_conditions which re-identifies by position - WRONG!)
+        // BCs are controlled by config file for user flexibility
         let v_max = config.boundary_conditions.extension_rate_m_per_s;
         let ramp_duration = config.boundary_conditions.ramp_duration_years;
         let ramp_fraction = if current_time_years < ramp_duration {
@@ -364,27 +365,47 @@ fn main() {
         };
         let v_current = v_max * ramp_fraction;
 
-        // X-boundaries: Extension (pull apart)
-        for &node_id in &left_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), -v_current);
+        // X-boundaries: Apply based on config
+        if config.boundary_conditions.bc_x0 == "velocity" {
+            // Priority: Explicit value from config > -v_current (symmetric extension)
+            let val = config.boundary_conditions.bc_val_x0.unwrap_or(-v_current);
+            if step == 0 || step == 1 { println!("    DEBUG: Applying BC X0 (Left): {:.3e} m/s", val); }
+            for &node_id in &left_nodes {
+                dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), val);
+            }
         }
-        for &node_id in &right_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), v_current);
+        if config.boundary_conditions.bc_x1 == "velocity" {
+            // Priority: Explicit value from config > v_current (symmetric extension)
+            let val = config.boundary_conditions.bc_val_x1.unwrap_or(v_current);
+            if step == 0 || step == 1 { println!("    DEBUG: Applying BC X1 (Right): {:.3e} m/s", val); }
+            for &node_id in &right_nodes {
+                dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 0), val);
+            }
         }
 
-        // Y-boundaries: Plane strain (vy = 0)
-        for &node_id in &back_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0);
+        // Y-boundaries: Apply based on config
+        if config.boundary_conditions.bc_y0 == "velocity" || config.boundary_conditions.bc_y0 == "plane_strain" {
+            // Default for plane strain is 0.0
+            let val = config.boundary_conditions.bc_val_y0.unwrap_or(0.0);
+            for &node_id in &back_nodes {
+                dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), val);
+            }
         }
-        for &node_id in &front_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), 0.0);
+        if config.boundary_conditions.bc_y1 == "velocity" || config.boundary_conditions.bc_y1 == "plane_strain" {
+             // Default for plane strain is 0.0
+            let val = config.boundary_conditions.bc_val_y1.unwrap_or(0.0);
+            for &node_id in &front_nodes {
+                dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 1), val);
+            }
         }
 
-        // Z-bottom: Fixed normal (vz = 0)
-        for &node_id in &bottom_nodes {
-            dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 2), 0.0);
+        // Z-boundaries: Apply based on config
+        if config.boundary_conditions.bc_z1 == "fixed_normal" {
+            for &node_id in &bottom_nodes {
+                dof_mgr.set_dirichlet(dof_mgr.velocity_dof(node_id, 2), 0.0);
+            }
         }
-        // Z-top is free surface (no BCs)
+        // Z-top (z=0): free surface if bc_z0 == "free_surface" (no BCs applied)
 
         if step < 20 && verbose {
             println!("    Apply Velocity Ramp: {:.1}% (t = {:.1} kyr, v = {:.2e} m/s)",

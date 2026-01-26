@@ -25,20 +25,63 @@ output_interval_years = 50_000.0  # 50 kyr (fewer outputs for longer run)
 quality_check_interval_years = 5_000.0
 
 [boundary_conditions]
-# Extension rate (m/s) - Matching DES3D
+# Extension rate (m/s) - Used for automatic BC values and ramp-up
 extension_rate_cm_per_year = 3.15  # ≈ π cm/yr
 extension_rate_m_per_s = 1.0e-9    # DES3D value
 
 # Velocity ramp-up (years)
+# BCs start at 0 and gradually increase to full velocity over this duration
 ramp_duration_years = 50_000.0  # Gradual spin-up
 
-# Boundary types
-bc_x0 = "velocity"        # Left: vx = -v_ext
-bc_x1 = "velocity"        # Right: vx = +v_ext
+# ============================================================================
+# Boundary Condition Setup
+# ============================================================================
+#
+# BOUNDARY TYPES:
+#   "velocity"      - Fixed velocity (requires explicit value or uses automatic)
+#   "plane_strain"  - Normal component = 0, tangential free
+#   "fixed_normal"  - Normal velocity = 0
+#   "free_surface"  - No constraints (e.g., top surface)
+#
+# VELOCITY VALUES (optional):
+#   bc_val_x0, bc_val_x1, bc_val_y0, bc_val_y1, bc_val_z0, bc_val_z1
+#
+#   If SPECIFIED: Uses exact value from config (full user control)
+#   If OMITTED:   Automatic symmetric extension
+#                 - X-boundaries: ±extension_rate_m_per_s (with ramp-up)
+#                 - Y/Z plane_strain: 0.0
+#
+# EXAMPLES:
+#   1. Symmetric extension (automatic):
+#      bc_x0 = "velocity"    # Automatically uses -extension_rate_m_per_s
+#      bc_x1 = "velocity"    # Automatically uses +extension_rate_m_per_s
+#
+#   2. Asymmetric rifting (explicit):
+#      bc_x0 = "velocity"
+#      bc_val_x0 = -2.0e-9   # Left pulls faster
+#      bc_x1 = "velocity"
+#      bc_val_x1 = 1.0e-9    # Right pulls slower
+#
+#   3. Simple shear (explicit):
+#      bc_x0 = "velocity"
+#      bc_val_x0 = -1.0e-9   # Left moves left
+#      bc_x1 = "velocity"
+#      bc_val_x1 = -1.0e-9   # Right also moves left
+# ============================================================================
+
+# X-boundaries: Symmetric extension
+bc_x0 = "velocity"        # Left boundary
+bc_x1 = "velocity"        # Right boundary
+bc_val_x0 = -1.0e-9       # Explicit: left velocity (negative = outward)
+bc_val_x1 = 1.0e-9        # Explicit: right velocity (positive = outward)
+
+# Y-boundaries: Plane strain (quasi-2D)
 bc_y0 = "plane_strain"    # Back: vy = 0
 bc_y1 = "plane_strain"    # Front: vy = 0
-bc_z0 = "free_surface"    # Top: free surface
-bc_z1 = "fixed_normal"    # Bottom: vz = 0
+
+# Z-boundaries: Free surface top, fixed bottom
+bc_z0 = "free_surface"    # Top: no constraints (allows topography)
+bc_z1 = "fixed_normal"    # Bottom: vz = 0 (no vertical motion)
 
 [initial_conditions]
 # Temperature field
